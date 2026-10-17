@@ -4,7 +4,7 @@
 
 Build or import a neighborhood, populate it with synthetic residents and safety personnel, run a deterministic nighttime simulation, test interventions, compare outcomes against a preserved baseline, and export a professional PDF report.
 
-> **Important:** Praesidium models *fictional scenarios* with *synthetic agents*. It does not predict actual crime, does not profile real people, and its modeled coverage outputs are simplified geometric approximations — not photometric or criminological assessments.
+> **Important:** Praesidium models *fictional scenarios* with *synthetic agents*. It does not predict actual crime, does not profile real people.
 
 ---
 
