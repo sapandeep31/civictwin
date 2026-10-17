@@ -163,22 +163,113 @@ export function prepareReportData(): ReportData | null {
 /* AI proposal application                                             */
 /* ------------------------------------------------------------------ */
 
-/** Apply a validated AI proposal as the intervention scenario. */
-export function applyAiProposal(proposal: Proposal): void {
-  const { project } = useEditor.getState();
-  if (!project) return;
+/** What one applied proposal changed — enough to show it on the map and to take it back. */
+export interface AppliedChange {
+  cameraIds: string[];
+  lightIds: string[];
+  patrols: { guardId: string; waypoints: { x: number; z: number }[] }[];
+  /** previous scenario guardCount, when the proposal changed it */
+  guardCount?: { prev: number | null | undefined };
+  /** where the change landed (for the camera fly-to) */
+  points: { x: number; z: number }[];
+}
+
+/** Where a proposal's changes land, before or after applying it (for "show on map"). */
+export function proposalFocusPoints(proposal: Proposal, project: PraesidiumProject): { x: number; z: number }[] {
+  const pts: { x: number; z: number }[] = [];
+  const w = project.world;
+  for (const op of proposal.ops) {
+    switch (op.op) {
+      case "add_streetlight":
+      case "add_camera":
+      case "move_streetlight":
+      case "move_camera":
+        pts.push({ x: op.x, z: op.z });
+        break;
+      case "edit_streetlight": {
+        const l = w.streetlights.find((o) => o.id === op.id);
+        if (l) pts.push({ x: l.x, z: l.z });
+        break;
+      }
+      case "edit_camera": {
+        const c = w.cameras.find((o) => o.id === op.id);
+        if (c) pts.push({ x: c.x, z: c.z });
+        break;
+      }
+      case "set_patrol":
+        pts.push(...op.waypoints.map((p) => ({ x: p.x, z: p.z })));
+        break;
+      case "set_scenario":
+        pts.push(...w.guards.filter((g) => g.active && g.waypoints[0]).map((g) => ({ x: g.waypoints[0].x, z: g.waypoints[0].z })));
+        break;
+    }
+  }
+  return pts;
+}
+
+/**
+ * Apply a validated AI proposal on top of the current society (changes stack:
+ * applying a second pick keeps the first). Returns what changed so the UI can
+ * fly to it and offer a per-change "Remove".
+ */
+export function applyAiProposal(proposal: Proposal): AppliedChange | null {
+  const s = useEditor.getState();
+  const project = s.project;
+  if (!project) return null;
+  // applying is an edit: leave the read-only simulation view (same as undo)
+  if (isLockedRun()) s.exitSimulation();
   const draft = deepClone(project);
+  const camBefore = new Set(draft.world.cameras.map((c) => c.id));
+  const lightBefore = new Set(draft.world.streetlights.map((l) => l.id));
+  const patrols = proposal.ops
+    .filter((op): op is Extract<typeof op, { op: "set_patrol" }> => op.op === "set_patrol")
+    .map((op) => ({ guardId: op.guardId, waypoints: deepClone(draft.world.guards.find((g) => g.id === op.guardId)?.waypoints ?? []) }));
+  const touchesGuards = proposal.ops.some((op) => op.op === "set_scenario" && op.patch.guardCount !== undefined);
+  const prevGuardCount = draft.scenario.guardCount;
+  const points = proposalFocusPoints(proposal, draft);
   applyProposal(draft, proposal);
   draft.modifiedAt = new Date().toISOString();
   useEditor.setState((st) => ({
     project: draft,
     dirty: true,
-    history: st.project
-      ? { past: [...st.history.past, st.project].slice(-50), future: [] }
-      : st.history,
+    history: st.project ? { past: [...st.history.past, st.project].slice(-50), future: [] } : st.history,
   }));
-  useEditor.getState().markSaved();
+  void useEditor.getState().save();
+  return {
+    cameraIds: draft.world.cameras.filter((c) => !camBefore.has(c.id)).map((c) => c.id),
+    lightIds: draft.world.streetlights.filter((l) => !lightBefore.has(l.id)).map((l) => l.id),
+    patrols,
+    ...(touchesGuards ? { guardCount: { prev: prevGuardCount } } : {}),
+    points,
+  };
 }
+
+/** Take back one applied change, leaving every other applied change in place. */
+export function revertAiChange(change: AppliedChange): void {
+  const s = useEditor.getState();
+  if (!s.project) return;
+  if (isLockedRun()) s.exitSimulation();
+  const draft = deepClone(s.project);
+  const cams = new Set(change.cameraIds);
+  const lights = new Set(change.lightIds);
+  draft.world.cameras = draft.world.cameras.filter((c) => !cams.has(c.id));
+  draft.world.streetlights = draft.world.streetlights.filter((l) => !lights.has(l.id));
+  for (const p of change.patrols) {
+    const g = draft.world.guards.find((o) => o.id === p.guardId);
+    if (g && p.waypoints.length) g.waypoints = deepClone(p.waypoints);
+  }
+  if (change.guardCount) draft.scenario = { ...draft.scenario, guardCount: change.guardCount.prev ?? null };
+  draft.modifiedAt = new Date().toISOString();
+  useEditor.setState((st) => ({
+    project: draft,
+    dirty: true,
+    selection: null,
+    history: st.project ? { past: [...st.history.past, st.project].slice(-50), future: [] } : st.history,
+  }));
+  void useEditor.getState().save();
+}
+
+const isLockedRun = () => useEditor.getState().activeRun !== null;
 
 export function newRunId(): string {
   return makeId("run");

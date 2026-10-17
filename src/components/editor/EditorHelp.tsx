@@ -81,8 +81,8 @@ const STEPS: { target: string; title: string; body: string; side: "right" | "lef
   },
   {
     target: "assistant",
-    title: "Ask the assistant",
-    body: "Get AI-suggested fixes with costs in ₹, apply them only if you approve, and Run intervention to compare against the same night. Press ? any time for shortcuts.",
+    title: "Open the AI planner",
+    body: "Get ranked fixes with costs in ₹ — apply any mix, watch the map zoom to each one, then re-run the night to compare. Press ? any time for shortcuts.",
     side: "top",
   },
 ];

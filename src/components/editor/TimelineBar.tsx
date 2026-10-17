@@ -233,7 +233,7 @@ export default function TimelineBar() {
             Compare
           </Button>
           <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => setAssistantOpen(true)} data-tour="assistant">
-            ✦ Assistant
+            ✦ AI planner
           </Button>
         </div>
       </div>

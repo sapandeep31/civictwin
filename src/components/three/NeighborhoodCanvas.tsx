@@ -20,6 +20,7 @@ import { RoadsLayer, BuildingsLayer, FacilitiesLayer, StreetlightsLayer, Cameras
 import { AgentsLayer, EventsLayer, PlaybackTicker } from "./playback";
 import { SiteLayers, fitZoom, DEFAULT_ZOOM } from "./siteLayers";
 import { DramaLayer } from "./drama";
+import { FocusFlyer } from "./focusFlyer";
 import { PatrolRoutes, PatrolHUD } from "./patrolEditor";
 import { snapToWalkable } from "@/lib/world/patrol";
 
@@ -454,6 +455,7 @@ function SceneContents() {
         target={[0, 0, 0]}
       />
       <CanvasControlsBridge controlsRef={controlsRef} />
+      <FocusFlyer />
     </>
   );
 }
