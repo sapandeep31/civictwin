@@ -376,7 +376,8 @@ function SceneContents() {
       <directionalLight position={[-120, 100, -80]} intensity={theme.rimIntensity} color={theme.rimColor} />
 
       {/* ground */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]} receiveShadow>
+      {/* well below the satellite image (2.5 cm) so they never fight in the depth buffer at any angle */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.3, 0]} receiveShadow>
         <planeGeometry args={[b.width + 60, b.depth + 60]} />
         <meshStandardMaterial color={theme.groundColor} roughness={0.85} />
       </mesh>

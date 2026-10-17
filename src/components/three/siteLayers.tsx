@@ -34,10 +34,13 @@ function SatelliteGround({ url, width, depth, night }: { url: string; width: num
   }, [url]);
   if (!tex) return null;
   return (
+    // Layering is by HEIGHT, not polygonOffset: the image sits at 2.5 cm, every road / path / area /
+    // marker at ≥ 4.5 cm, the dark base ground at −30 cm. (A slope-scaled polygonOffset pushed the
+    // image behind the base ground at oblique angles, so it vanished everywhere but top-down.)
+    // raycast disabled: clicks always pass through to roads and objects.
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.025, 0]} renderOrder={-1} raycast={() => null}>
       <planeGeometry args={[width, depth]} />
-      {/* pushed BACK (positive offset) so roads/paths/areas always win the depth test at oblique angles */}
-      <meshBasicMaterial map={tex} color={night ? "#6f7a8c" : "#ffffff"} toneMapped={false} polygonOffset polygonOffsetFactor={2} polygonOffsetUnits={4} />
+      <meshBasicMaterial map={tex} color={night ? "#6f7a8c" : "#ffffff"} toneMapped={false} />
     </mesh>
   );
 }

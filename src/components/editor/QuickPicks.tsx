@@ -189,13 +189,32 @@ export default function QuickPicks({ appliedIds, onApply, onRemove, onShow, onEx
     );
   }
 
-  // once the same-night tests are in, a pick that made the night worse must not stay near the top
+  // Once the same-night tests are in, the MEASURED result outranks the fast judgment:
+  //  1. tested & helped — by risk reduced per ₹ (free fixes first), then by risk reduced
+  //  2. not tested yet — in the AI's order
+  //  3. tested, no effect · 4. tested, made the night worse
   const ordered = rows
     ? rows
         .map((r, i) => ({ r, i, v: verified[r.id] }))
         .sort((a, b) => {
-          const worse = (x: typeof a) => (x.v && x.v !== "running" && x.v.riskReduced < 0 ? 1 : 0);
-          return worse(a) - worse(b) || a.i - b.i;
+          const tested = (x: typeof a) => (x.v && x.v !== "running" ? x.v : null);
+          const tier = (x: typeof a) => {
+            const t = tested(x);
+            return !t ? 1 : t.riskReduced > 0 ? 0 : t.riskReduced === 0 ? 2 : 3;
+          };
+          const ta = tier(a);
+          const tb = tier(b);
+          if (ta !== tb) return ta - tb;
+          if (ta === 0) {
+            const A = tested(a)!;
+            const B = tested(b)!;
+            const perRupee = (t: VerifiedPick, cost: number) => (cost > 0 ? t.riskReduced / cost : Number.POSITIVE_INFINITY);
+            const pa = perRupee(A, a.r.costInr);
+            const pb = perRupee(B, b.r.costInr);
+            if (pa !== pb) return pb - pa;
+            return B.riskReduced - A.riskReduced || a.r.costInr - b.r.costInr;
+          }
+          return a.i - b.i;
         })
         .map((x) => x.r)
     : null;
@@ -368,7 +387,7 @@ export default function QuickPicks({ appliedIds, onApply, onRemove, onShow, onEx
 
       {rows && rows.length > 0 && (
         <div className="mt-1.5 flex items-center justify-between gap-2">
-          <span className="text-[9.5px] text-[#9a9384]">{aiScored ? "Ranked by AI, tested in the simulation" : "Ranked by built-in rules (AI unavailable)"}</span>
+          <span className="text-[9.5px] text-[#9a9384]">{aiScored ? "Ranked by AI, then re-ordered by tested risk reduced per ₹" : "Ranked by built-in rules (AI unavailable), then by tested risk per ₹"}</span>
           <button onClick={explain} className="shrink-0 rounded px-1.5 py-0.5 text-[10.5px] font-medium text-[#2e5b7d] hover:bg-[#eef3f8]">
             ✦ Explain these
           </button>
