@@ -65,3 +65,6 @@ worklog.md
 *.db
 *.db-journal
 /.next-prod/
+
+# import evaluation caches (scripts/eval-import.ts, bench-buildings.ts)
+.eval-import*/

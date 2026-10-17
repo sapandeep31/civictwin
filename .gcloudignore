@@ -24,3 +24,5 @@ prisma
 *.pid
 dev.pid
 Caddyfile
+
+.eval-import*

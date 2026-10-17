@@ -139,7 +139,46 @@ export async function callGemini(req: GeminiRequest): Promise<GeminiResponse> {
   throw lastError ?? new Error("All Gemini models failed");
 }
 
-/** Parse JSON from a model reply, tolerating ```json fences and stray prose. */
+/**
+ * Best-effort repair of model JSON: trailing commas, and replies cut off by the
+ * token limit (truncated at the last complete element, open brackets closed).
+ */
+export function repairJson(raw: string): string {
+  let out = "";
+  const stack: string[] = [];
+  let inStr = false;
+  let esc = false;
+  let cut = -1; // length of `out` at the last complete element
+  let cutStack: string[] = [];
+  for (const ch of raw) {
+    if (inStr) {
+      out += ch;
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{" || ch === "[") stack.push(ch === "{" ? "}" : "]");
+    else if (ch === "}" || ch === "]") {
+      out = out.replace(/,\s*$/, ""); // trailing comma (outside strings only)
+      stack.pop();
+      out += ch;
+      cut = out.length;
+      cutStack = stack.slice();
+      if (!stack.length) return out;
+      continue;
+    } else if (ch === "," && stack.length) {
+      cut = out.length;
+      cutStack = stack.slice();
+    }
+    out += ch;
+  }
+  if (!stack.length || cut < 0) return out;
+  return out.slice(0, cut).replace(/,\s*$/, "") + cutStack.reverse().join("");
+}
+
+/** Parse JSON from a model reply, tolerating ```json fences, stray prose, trailing commas and truncation. */
 export function parseJsonLoose<T = unknown>(text: string): T {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const raw = (fenced ? fenced[1] : text).trim();
@@ -147,9 +186,19 @@ export function parseJsonLoose<T = unknown>(text: string): T {
     return JSON.parse(raw) as T;
   } catch {
     const start = raw.search(/[[{]/);
-    const end = Math.max(raw.lastIndexOf("}"), raw.lastIndexOf("]"));
-    if (start >= 0 && end > start) return JSON.parse(raw.slice(start, end + 1)) as T;
-    throw new Error("Model reply was not valid JSON");
+    if (start < 0) throw new Error("Model reply was not valid JSON");
+    const body = raw.slice(start);
+    try {
+      const end = Math.max(body.lastIndexOf("}"), body.lastIndexOf("]"));
+      if (end > 0) return JSON.parse(body.slice(0, end + 1)) as T;
+    } catch {
+      /* fall through to repair */
+    }
+    try {
+      return JSON.parse(repairJson(body)) as T;
+    } catch {
+      throw new Error("Model reply was not valid JSON");
+    }
   }
 }
 

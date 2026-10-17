@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { geocode } from "@/lib/geo/osm";
+import { searchPlaces } from "@/lib/geo/osm";
 import { rateLimit, readJson } from "@/lib/api/http";
 
 export const dynamic = "force-dynamic";
 
 /**
- * POST /api/geo/search — geographic place search via a configurable
- * OSM-compatible geocoder (Nominatim by default).
+ * POST /api/geo/search — place search: Google Places (when a key is set) merged
+ * with an OSM-compatible geocoder (Nominatim by default, with mapped outlines).
  */
 export async function POST(req: NextRequest) {
   const limited = rateLimit(req, "geo/search", 30);
@@ -19,12 +19,12 @@ export async function POST(req: NextRequest) {
   if (q.length > 200) return NextResponse.json({ ok: false, error: "Query is too long." }, { status: 400 });
 
   try {
-    const results = await geocode(q);
+    const results = await searchPlaces(q);
     return NextResponse.json({
       ok: true,
       data: {
         results,
-        attribution: "© OpenStreetMap contributors",
+        attribution: results.some((r) => r.source === "google") ? "Google Places · © OpenStreetMap contributors" : "© OpenStreetMap contributors",
       },
     });
   } catch (err) {

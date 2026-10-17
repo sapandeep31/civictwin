@@ -26,6 +26,20 @@ export interface GeoSearchResult {
   lat: number;
   lon: number;
   boundingbox: [number, number, number, number]; // [s, n, w, e]
+  /** Mapped outline of the place ([lat, lon] ring) when the geocoder knows one. */
+  outline?: [number, number][];
+  source?: "osm" | "google";
+}
+
+type GeoJsonGeom = { type: string; coordinates: unknown };
+
+/** Largest outer ring of a GeoJSON Polygon / MultiPolygon as [lat, lon][]. */
+function outerRing(g: GeoJsonGeom | undefined): [number, number][] | undefined {
+  if (!g) return undefined;
+  const polys = g.type === "Polygon" ? [g.coordinates as number[][][]] : g.type === "MultiPolygon" ? (g.coordinates as number[][][][]) : [];
+  let best: number[][] | undefined;
+  for (const p of polys) if (p[0] && (!best || p[0].length > best.length)) best = p[0];
+  return best && best.length >= 4 ? best.map(([lo, la]) => [la, lo] as [number, number]) : undefined;
 }
 
 export async function geocode(q: string): Promise<GeoSearchResult[]> {
@@ -33,6 +47,8 @@ export async function geocode(q: string): Promise<GeoSearchResult[]> {
   url.searchParams.set("q", q);
   url.searchParams.set("format", "json");
   url.searchParams.set("limit", "6");
+  url.searchParams.set("polygon_geojson", "1");
+  url.searchParams.set("polygon_threshold", "0.00002");
   const res = await fetch(url, {
     headers: { "User-Agent": "Praesidium/1.0 (neighborhood safety planning demo)" },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -43,6 +59,7 @@ export async function geocode(q: string): Promise<GeoSearchResult[]> {
     lat?: string;
     lon?: string;
     boundingbox?: string[];
+    geojson?: GeoJsonGeom;
   }>;
   return data
     .filter((d) => d.lat && d.lon)
@@ -56,25 +73,86 @@ export async function geocode(q: string): Promise<GeoSearchResult[]> {
         parseFloat(d.boundingbox?.[2] ?? d.lon!),
         parseFloat(d.boundingbox?.[3] ?? d.lon!),
       ],
+      outline: outerRing(d.geojson),
+      source: "osm" as const,
     }));
+}
+
+/**
+ * Google Places text search (New API). Far better than Nominatim at Indian
+ * society / apartment names; only used when GOOGLE_MAPS_API_KEY is set.
+ */
+export async function placesSearch(q: string): Promise<GeoSearchResult[]> {
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (!key) return [];
+  const res = await fetch("https://places.googleapis.com/v1/places:searchText", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": key,
+      "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location",
+    },
+    body: JSON.stringify({ textQuery: q, regionCode: "IN", pageSize: 5 }),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`Places search returned HTTP ${res.status}`);
+  const data = (await res.json()) as {
+    places?: Array<{
+      displayName?: { text?: string };
+      formattedAddress?: string;
+      location?: { latitude: number; longitude: number };
+    }>;
+  };
+  return (data.places ?? [])
+    .filter((p) => p.location)
+    .map((p) => {
+      const { latitude: lat, longitude: lon } = p.location!;
+      return {
+        displayName: [p.displayName?.text, p.formattedAddress].filter(Boolean).join(", ") || "Unknown place",
+        lat,
+        lon,
+        // Places viewports are a generic ~300 m frame, not the property — treat the result as a point
+        boundingbox: [lat, lat, lon, lon] as [number, number, number, number],
+        source: "google" as const,
+      };
+    });
+}
+
+/** Places first (better recall for society names), then Nominatim; near-duplicates dropped. */
+export async function searchPlaces(q: string): Promise<GeoSearchResult[]> {
+  const [g, o] = await Promise.allSettled([placesSearch(q), geocode(q)]);
+  const google = g.status === "fulfilled" ? g.value : [];
+  const osm = o.status === "fulfilled" ? o.value : [];
+  if (!google.length && !osm.length && o.status === "rejected") throw o.reason;
+  const out: GeoSearchResult[] = [];
+  const near = (a: GeoSearchResult, b: GeoSearchResult) => Math.hypot((a.lat - b.lat) * 111320, (a.lon - b.lon) * 111320 * Math.cos((a.lat * Math.PI) / 180)) < 150;
+  for (const r of [...google, ...osm]) {
+    const dup = out.find((x) => near(x, r));
+    if (!dup) out.push(r);
+    else if (!dup.outline && r.outline) dup.outline = r.outline; // keep Google's name, borrow OSM's outline
+  }
+  return out.slice(0, 8);
 }
 
 export interface OsmFeatureBundle {
   roads: Array<{ id: string; name?: string; points: [number, number][]; width: number; path: boolean }>;
-  buildings: Array<{ id: string; name?: string; polygon: [number, number][]; height?: number; levels?: number }>;
+  /** `source` set for non-OSM footprints (e.g. "Google Open Buildings" via Overture) — always marked inferred */
+  buildings: Array<{ id: string; name?: string; polygon: [number, number][]; height?: number; levels?: number; source?: string }>;
   parks: Array<{ id: string; name?: string; polygon: [number, number][] }>;
   facilities: Array<{ id: string; name?: string; type: string; lat: number; lon: number }>;
   attribution: string;
   fetchedAt: string;
 }
 
-interface OverpassEl {
+export interface OverpassEl {
   type: string;
   id: number;
   tags?: Record<string, string>;
   geometry?: Array<{ lat: number; lon: number }>;
   lat?: number;
   lon?: number;
+  /** relations (out geom): member ways with their geometry */
+  members?: Array<{ type: string; role: string; geometry?: Array<{ lat: number; lon: number }> }>;
 }
 
 const UA = "Praesidium/1.0 (neighborhood safety planning demo; contact: sapandeep@thevectorlabs.in)";
@@ -174,7 +252,79 @@ function classifyHttpError(status: number, bodyText: string): OsmImportError {
   return new OsmImportError(`Map data provider returned HTTP ${status}`);
 }
 
-async function tryOverpass(mirror: string, query: string, ms: number): Promise<OverpassEl[]> {
+type Attempt = { label: string; run: (ms: number, signal: AbortSignal) => Promise<OverpassEl[]> };
+
+/** Start the next mirror if the current one hasn't answered within this long (public mirrors often hang). */
+const HEDGE_MS = Number(process.env.OSM_HEDGE_MS || 4000);
+let lastGoodMirror: string | null = null;
+const orderMirrors = (ms: string[]) => (lastGoodMirror && ms.includes(lastGoodMirror) ? [lastGoodMirror, ...ms.filter((m) => m !== lastGoodMirror)] : ms);
+
+/**
+ * Hedged requests: run attempts in order, but launch the next one early when
+ * the running ones are slow (every `hedgeMs`) or as soon as one fails. The
+ * first success wins and the rest are aborted.
+ */
+async function hedged(attempts: Attempt[], budgetMs: number, hedgeMs: number): Promise<{ els: OverpassEl[] | null; label: string | null; errors: OsmImportError[] }> {
+  const started = Date.now();
+  const ctrl = new AbortController();
+  const errors: OsmImportError[] = [];
+  return new Promise((resolve) => {
+    let next = 0;
+    let running = 0;
+    let done = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (els: OverpassEl[] | null, label: string | null) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      ctrl.abort();
+      resolve({ els, label, errors });
+    };
+    const launch = () => {
+      if (done) return;
+      if (timer) clearTimeout(timer);
+      const left = budgetMs - (Date.now() - started);
+      if (next >= attempts.length || left < 2500) {
+        if (!running) finish(null, null);
+        return;
+      }
+      const a = attempts[next++];
+      running++;
+      a.run(Math.min(PER_TRY_MS, left), ctrl.signal).then(
+        (els) => finish(els, a.label),
+        (err) => {
+          running--;
+          if (done) return;
+          const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+          errors.push(err instanceof OsmImportError ? err : new OsmImportError(err instanceof Error ? err.message : String(err), isTimeout ? "timeout" : "unavailable"));
+          console.warn(`[osm] ${a.label} failed after ${Date.now() - started}ms: ${errors[errors.length - 1].message}`);
+          launch();
+        }
+      );
+      timer = setTimeout(launch, hedgeMs);
+    };
+    launch();
+  });
+}
+
+/** Run a small Overpass query against the mirrors, hedged (shared by the compound locator). */
+export async function overpassQuery(query: string, budgetMs = 20000): Promise<OverpassEl[]> {
+  const mirrors = orderMirrors(Array.from(new Set(OVERPASS_MIRRORS)));
+  const r = await hedged(
+    mirrors.map((m) => ({ label: m, run: (ms, sig) => tryOverpass(m, query, ms, sig) })),
+    budgetMs,
+    HEDGE_MS
+  );
+  if (r.els) {
+    lastGoodMirror = r.label;
+    return r.els;
+  }
+  throw r.errors[r.errors.length - 1] ?? new OsmImportError("Map data providers are unavailable.");
+}
+
+const withAbort = (ms: number, signal?: AbortSignal) => (signal ? AbortSignal.any([AbortSignal.timeout(ms), signal]) : AbortSignal.timeout(ms));
+
+async function tryOverpass(mirror: string, query: string, ms: number, signal?: AbortSignal): Promise<OverpassEl[]> {
   const res = await fetch(mirror, {
     method: "POST",
     headers: {
@@ -183,7 +333,7 @@ async function tryOverpass(mirror: string, query: string, ms: number): Promise<O
       "User-Agent": UA,
     },
     body: `data=${encodeURIComponent(query)}`,
-    signal: AbortSignal.timeout(ms),
+    signal: withAbort(ms, signal),
   });
   const text = await res.text();
   if (!res.ok) throw classifyHttpError(res.status, text.slice(0, 400));
@@ -196,11 +346,11 @@ async function tryOverpass(mirror: string, query: string, ms: number): Promise<O
   return data.elements ?? [];
 }
 
-async function tryOsmApi(s: number, n: number, w: number, e: number, ms: number): Promise<OverpassEl[]> {
+async function tryOsmApi(s: number, n: number, w: number, e: number, ms: number, signal?: AbortSignal): Promise<OverpassEl[]> {
   const url = `${OSM_API_URL}?bbox=${w.toFixed(6)},${s.toFixed(6)},${e.toFixed(6)},${n.toFixed(6)}`;
   const res = await fetch(url, {
     headers: { "User-Agent": UA, Accept: "application/xml" },
-    signal: AbortSignal.timeout(ms),
+    signal: withAbort(ms, signal),
   });
   const text = await res.text();
   if (!res.ok) throw classifyHttpError(res.status, text.slice(0, 400));
@@ -232,33 +382,20 @@ out body geom;`;
   const area = (n - s) * (e - w);
   const canUseApi = area <= OSM_API_MAX_AREA_DEG2;
 
-  type Attempt = { label: string; run: (ms: number) => Promise<OverpassEl[]> };
-  const attempts: Attempt[] = mirrors.map((m) => ({ label: m, run: (ms) => tryOverpass(m, query, ms) }));
+  const attempts: Attempt[] = orderMirrors(mirrors).map((m) => ({ label: m, run: (ms, sig) => tryOverpass(m, query, ms, sig) }));
   if (canUseApi) {
-    const apiAttempt: Attempt = { label: OSM_API_URL, run: (ms) => tryOsmApi(s, n, w, e, ms) };
+    const apiAttempt: Attempt = { label: OSM_API_URL, run: (ms, sig) => tryOsmApi(s, n, w, e, ms, sig) };
     // If every Overpass mirror failed very recently, go straight to the official API first.
     if (Date.now() < overpassDownUntil) attempts.unshift(apiAttempt);
-    else attempts.push(apiAttempt);
+    else attempts.splice(Math.min(2, attempts.length), 0, apiAttempt); // third in line: reliable, just slower
   }
 
-  let els: OverpassEl[] | null = null;
-  const errors: OsmImportError[] = [];
-  for (const a of attempts) {
-    const left = remaining();
-    if (left < 2500) break;
-    try {
-      els = await a.run(Math.min(PER_TRY_MS, left));
-      if (a.label === OSM_API_URL && errors.length >= mirrors.length) overpassDownUntil = Date.now() + 2 * 60 * 1000;
-      else if (a.label !== OSM_API_URL) overpassDownUntil = 0;
-      break;
-    } catch (err) {
-      const isTimeout = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-      errors.push(
-        err instanceof OsmImportError
-          ? err
-          : new OsmImportError(err instanceof Error ? err.message : String(err), isTimeout ? "timeout" : "unavailable")
-      );
-      console.warn(`[osm] ${a.label} failed after ${Date.now() - started}ms: ${errors[errors.length - 1].message}`);
+  const { els, label, errors } = await hedged(attempts, remaining(), HEDGE_MS);
+  if (els) {
+    if (label === OSM_API_URL && errors.length >= mirrors.length) overpassDownUntil = Date.now() + 2 * 60 * 1000;
+    else if (label !== OSM_API_URL) {
+      overpassDownUntil = 0;
+      lastGoodMirror = label;
     }
   }
   if (els === null) {

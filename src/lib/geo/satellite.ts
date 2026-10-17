@@ -203,6 +203,18 @@ export async function downscaleJpeg(buf: Buffer, maxPx = 768): Promise<Buffer> {
   return sharp(buf).resize(maxPx, maxPx, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
 }
 
+/** Draw a red crosshair at the image centre (marks the searched point for the compound locator). */
+export async function markCenter(buf: Buffer): Promise<Buffer> {
+  const { width = 512, height = 512 } = await sharp(buf).metadata();
+  const cx = width / 2;
+  const cy = height / 2;
+  const r = Math.round(Math.min(width, height) * 0.025);
+  const svg = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><g stroke="#ff1a1a" stroke-width="3" fill="none"><circle cx="${cx}" cy="${cy}" r="${r}"/><line x1="${cx - r * 2}" y1="${cy}" x2="${cx - r * 0.5}" y2="${cy}"/><line x1="${cx + r * 0.5}" y1="${cy}" x2="${cx + r * 2}" y2="${cy}"/><line x1="${cx}" y1="${cy - r * 2}" x2="${cx}" y2="${cy - r * 0.5}"/><line x1="${cx}" y1="${cy + r * 0.5}" x2="${cx}" y2="${cy + r * 2}"/></g></svg>`
+  );
+  return sharp(buf).composite([{ input: svg }]).jpeg({ quality: 82 }).toBuffer();
+}
+
 /** Local-meter span of a bbox (same projection as convertOsmToWorld). */
 export function bboxMeters(s: number, n: number, w: number, e: number) {
   const lat0 = (s + n) / 2;

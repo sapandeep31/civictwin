@@ -32,8 +32,8 @@ export type BaseLayer = "satellite" | "map" | "hybrid";
 export type ShapeMode = "rect" | "polygon";
 
 interface Props {
-  /** Fly here (and reset to an axis-aligned rectangle) when it changes. */
-  focus: { lat: number; lng: number; bbox: Bbox; seq: number } | null;
+  /** Fly here when it changes: to an editable outline when `ring` is given, else an axis-aligned rectangle. */
+  focus: { lat: number; lng: number; bbox: Bbox; seq: number; ring?: [number, number][] } | null;
   selection: Selection | null;
   onSelection: (s: Selection) => void;
   onBaseLayer?: (b: BaseLayer) => void;
@@ -469,10 +469,11 @@ async function mountLeaflet(
     fly: (f) => {
       if (drawRing) endDraw();
       rect = rectFromBbox(f.bbox);
-      ring = rectCorners(rect);
-      if (mode !== "rect") {
-        mode = "rect";
-        cb.onMode("rect");
+      const want: ShapeMode = f.ring && f.ring.length >= 3 ? "polygon" : "rect";
+      ring = want === "polygon" ? f.ring!.map((p) => [p[0], p[1]] as LatLng) : rectCorners(rect);
+      if (mode !== want) {
+        mode = want;
+        cb.onMode(want);
       }
       rebuild();
       fit(f.bbox);

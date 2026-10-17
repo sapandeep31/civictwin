@@ -7,7 +7,7 @@
  * Degrades gracefully: Gemini failure → OSM-only; OSM failure → Gemini-only.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,7 @@ import {
   isAxisAligned,
   rectFromBbox,
   ringAreaM2,
+  ringBbox,
   ringToLocal,
   ringToUV,
   selectionBbox,
@@ -45,7 +46,23 @@ interface SearchResult {
   lat: number;
   lon: number;
   boundingbox: [number, number, number, number];
+  outline?: [number, number][];
+  source?: "osm" | "google";
 }
+
+interface CompoundInfo {
+  ring: [number, number][];
+  source: "geocoder" | "osm" | "gemini";
+  name?: string;
+  areaHa: number;
+  note?: string;
+}
+
+const COMPOUND_SOURCE: Record<CompoundInfo["source"], string> = {
+  geocoder: "from OpenStreetMap",
+  osm: "from OpenStreetMap",
+  gemini: "estimated by Gemini from satellite",
+};
 
 type StepState = "pending" | "active" | "done" | "skipped" | "failed";
 const STEPS = ["Fetching map data", "Capturing satellite + street map", "Gemini analysing layout", "Building 3D twin"] as const;
@@ -75,7 +92,9 @@ function societyBox(r: SearchResult): Bbox {
   const lat = (s + n) / 2 || r.lat;
   const lon = (w + e) / 2 || r.lon;
   const sp = spanM([s, n, w, e]);
-  const half = (m: number) => Math.max(200, Math.min(600, m * 1.15)) / 2;
+  // a bare point (Places / node result) says nothing about size: start from a mid-sized 300 m frame
+  const floor = sp.w < 30 && sp.d < 30 ? 300 : 200;
+  const half = (m: number) => Math.max(floor, Math.min(600, m * 1.15)) / 2;
   const hl = half(sp.d) / 111320;
   const hw = half(sp.w) / (111320 * Math.cos((lat * Math.PI) / 180));
   return [lat - hl, lat + hl, lon - hw, lon + hw];
@@ -93,7 +112,7 @@ export default function ImportDialog() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [placeName, setPlaceName] = useState("");
-  const [focus, setFocus] = useState<{ lat: number; lng: number; bbox: Bbox; seq: number } | null>(null);
+  const [focus, setFocus] = useState<{ lat: number; lng: number; bbox: Bbox; seq: number; ring?: [number, number][] } | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [baseLayer, setBaseLayer] = useState<BaseLayer | null>(null);
   const bbox: Bbox | null = selection ? selectionBbox(selection) : null;
@@ -117,6 +136,9 @@ export default function ImportDialog() {
     setPlaceName("");
     setFocus(null);
     setSelection(null);
+    pickSeq.current++;
+    setLocating(false);
+    setBoundary(null);
     resetRun();
   };
   const resetRun = () => {
@@ -148,12 +170,38 @@ export default function ImportDialog() {
     }
   };
 
-  const pick = (r: SearchResult) => {
+  const pickSeq = useRef(0);
+  const [locating, setLocating] = useState(false);
+  const [boundary, setBoundary] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const pick = async (r: SearchResult) => {
     const b = societyBox(r);
     setPlaceName(r.displayName.split(",")[0]);
     setResults([]);
     setSelection(rectFromBbox(b));
     setFocus({ lat: r.lat, lng: r.lon, bbox: b, seq: Date.now() });
+    // then snap the selection to the society's real perimeter (OSM area → Gemini), so the twin covers just the compound
+    const seq = ++pickSeq.current;
+    setLocating(true);
+    setBoundary(null);
+    try {
+      const d = (await postJson("/api/geo/compound", { lat: r.lat, lon: r.lon, query: query.trim() || r.displayName, outline: r.outline ?? null })) as {
+        compound: CompoundInfo | null;
+      };
+      if (seq !== pickSeq.current) return;
+      const c = d.compound;
+      if (c && c.ring.length >= 3) {
+        setSelection({ kind: "polygon", ring: c.ring });
+        setFocus({ lat: r.lat, lng: r.lon, bbox: ringBbox(c.ring), ring: c.ring, seq: Date.now() });
+        setBoundary({ ok: true, text: `Society boundary ${COMPOUND_SOURCE[c.source]}${c.name ? ` (“${c.name}”)` : ""} · ${c.areaHa} ha — drag the points if it's off.` });
+      } else {
+        setBoundary({ ok: false, text: "Couldn't find the society's boundary automatically — fit the rectangle (or draw a polygon) around it." });
+      }
+    } catch {
+      if (seq === pickSeq.current) setBoundary({ ok: false, text: "Boundary lookup failed — fit the rectangle (or draw a polygon) around the society." });
+    } finally {
+      if (seq === pickSeq.current) setLocating(false);
+    }
   };
 
   const span = bbox ? spanM(bbox) : null;
@@ -183,7 +231,11 @@ export default function ImportDialog() {
 
     const osmP = postJson("/api/geo/import", { south, north, west, east, name: placeName, fixToBbox: true })
       .then((d) => {
-        set(0, "done", `${d.stats.buildings} buildings · ${d.stats.roads} roads · ${d.stats.facilities} facilities`);
+        set(
+          0,
+          "done",
+          `${d.stats.buildings} buildings${d.stats.extraBuildings ? ` (${d.stats.extraBuildings} machine-traced)` : ""} · ${d.stats.roads} roads · ${d.stats.facilities} facilities`
+        );
         return d as { world: World; notes: string[]; attribution: string };
       })
       .catch((err: Error) => {
@@ -238,7 +290,11 @@ export default function ImportDialog() {
         summary = v.description;
         setSocietyType(v.societyType);
         setDescription(v.description);
-        set(2, "done", `+${v.added.buildings} buildings · ${v.added.gates} gates · ${v.added.walls ? "boundary wall" : "no wall"} · ${v.added.areas} zones (${v.model}${v.usedStreetMap ? ", satellite + street map" : ""})`);
+        set(
+          2,
+          "done",
+          `+${v.added.buildings} buildings${v.added.rejected ? ` (${v.added.rejected} implausible/duplicate dropped)` : ""} · ${v.added.gates} gates · ${v.added.walls ? "boundary wall" : "no wall"} · ${v.added.areas} zones (${v.model}${v.usedStreetMap ? ", satellite + street map" : ""})`
+        );
         notes.push("Walls, gates, dark zones and extra buildings were inferred by Gemini from satellite imagery — verify them on the ground.");
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Gemini is unavailable.";
@@ -347,9 +403,9 @@ export default function ImportDialog() {
         <DialogHeader>
           <DialogTitle className="text-[#1d2430]">Pick your society on the map</DialogTitle>
           <DialogDescription className="text-xs text-[#5c6470]">
-            Search, then fit the yellow rectangle around your society (~150–600 m) — rotate it, or switch to Polygon for an
-            irregular compound. Gemini reads the satellite photo (plus a street map for road and gate names) to add compound
-            walls, gates, missing buildings and likely dark zones on top of OpenStreetMap.
+            Search for your society — we outline its compound automatically (adjust the points if needed, or draw your own).
+            Buildings come from OpenStreetMap plus machine-traced footprints (Overture Maps); Gemini reads the satellite photo
+            and a street map to add compound walls, gates, any still-missing buildings and likely dark zones.
           </DialogDescription>
         </DialogHeader>
 
@@ -375,11 +431,20 @@ export default function ImportDialog() {
                       {r.displayName}
                     </button>
                   ))}
-                  <div className="px-3 py-1 text-right text-[9px] text-[#8a8272]">Search © OpenStreetMap contributors (Nominatim)</div>
+                  <div className="px-3 py-1 text-right text-[9px] text-[#8a8272]">
+                    {results.some((r) => r.source === "google") ? "Search: Google Places · © OpenStreetMap contributors" : "Search © OpenStreetMap contributors (Nominatim)"}
+                  </div>
                 </div>
               )}
             </div>
             {searchError && <div className="rounded-md border border-[#e6c98a] bg-[#fdf6e7] px-3 py-1.5 text-xs text-[#7a5d1e]">{searchError}</div>}
+            {locating && <div className="animate-pulse rounded-md border border-[#dcd6c8] bg-white px-3 py-1.5 text-xs text-[#5c6470]">Finding the society's boundary…</div>}
+            {!locating && boundary && (
+              <div className={`rounded-md border px-3 py-1.5 text-xs ${boundary.ok ? "border-[#cfe2d7] bg-[#eef4f0] text-[#2e7d5b]" : "border-[#e6c98a] bg-[#fdf6e7] text-[#7a5d1e]"}`}>
+                {boundary.ok ? "✓ " : ""}
+                {boundary.text}
+              </div>
+            )}
 
             <div className="h-[420px]">
               <MapPicker focus={focus} selection={selection} onSelection={setSelection} onBaseLayer={setBaseLayer} />
@@ -413,8 +478,8 @@ export default function ImportDialog() {
                 <Button size="sm" variant="outline" className="h-8 text-xs" disabled={sampleLoading} onClick={loadSample} title="Pre-built twin of Prestige Shantiniketan, Bengaluru (cached satellite + Gemini analysis)">
                   {sampleLoading ? "Loading sample…" : "Try a sample society"}
                 </Button>
-                <Button size="sm" className="h-8 bg-[#2e7d5b] text-xs text-white hover:bg-[#276c4f]" disabled={!spanOk} onClick={build}>
-                  Build 3D twin with Gemini
+                <Button size="sm" className="h-8 bg-[#2e7d5b] text-xs text-white hover:bg-[#276c4f]" disabled={!spanOk || locating} onClick={build}>
+                  {locating ? "Finding boundary…" : "Build 3D twin with Gemini"}
                 </Button>
               </div>
             </div>

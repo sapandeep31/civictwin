@@ -10,34 +10,54 @@
 
 import { z } from "zod";
 import type { Building, BuildingCategory, Facility, Road, SiteLayers, Vec2, World } from "../world/types";
+import { orientedBox, polygonArea } from "./footprint";
 
 const num = z.coerce.number().refine(Number.isFinite);
 const uv = z.tuple([num, num]);
 const box = z.object({ u: num, v: num, widthM: num.optional(), depthM: num.optional(), rotationDeg: num.optional() });
 
+/**
+ * Array that keeps every valid item and drops malformed ones (and caps the
+ * length) — one bad or truncated entry from the model must not discard the rest.
+ */
+function lenient<T extends z.ZodTypeAny>(item: T, max: number) {
+  return z
+    .array(z.unknown())
+    .catch([])
+    .transform((xs) =>
+      xs
+        .flatMap((x) => {
+          const r = item.safeParse(x);
+          return r.success ? [r.data as z.infer<T>] : [];
+        })
+        .slice(0, max)
+    );
+}
+
 export const VisionLayoutSchema = z.object({
   societyType: z.string().max(60).catch("other"),
   description: z.string().max(800).catch(""),
-  boundary: z.array(uv).max(80).catch([]),
-  gates: z
-    .array(z.object({ u: num, v: num, kind: z.enum(["main", "service", "pedestrian"]).catch("main"), name: z.string().max(60).optional().catch(undefined) }))
-    .max(12)
-    .catch([]),
-  buildings: z
-    .array(
-      box.extend({
-        floors: num.optional(),
-        category: z.enum(["residential", "commercial", "community", "mixed", "other"]).catch("residential"),
-        name: z.string().max(60).optional().catch(undefined),
-      })
-    )
-    .max(200)
-    .catch([]),
-  roads: z.array(z.object({ points: z.array(uv).min(2).max(40), kind: z.enum(["road", "path"]).catch("road") })).max(60).catch([]),
-  openAreas: z.array(box.extend({ name: z.string().max(60).optional().catch(undefined) })).max(30).catch([]),
-  parking: z.array(box).max(30).catch([]),
-  guardBooths: z.array(z.object({ u: num, v: num, note: z.string().max(140).optional().catch(undefined) })).max(12).catch([]),
-  darkZones: z.array(box.extend({ reason: z.string().max(160).optional().catch(undefined) })).max(20).catch([]),
+  boundary: lenient(uv, 80),
+  gates: lenient(z.object({ u: num, v: num, kind: z.enum(["main", "service", "pedestrian"]).catch("main"), name: z.string().max(60).optional().catch(undefined) }), 12),
+  buildings: lenient(
+    box.extend({
+      /** 4 roof corners in u,v (preferred — models place points far better than they estimate meters) */
+      corners: lenient(uv, 8)
+        .optional()
+        .transform((c) => (c && c.length >= 3 ? c : undefined)),
+      u: num.optional(),
+      v: num.optional(),
+      floors: num.optional(),
+      category: z.enum(["residential", "commercial", "community", "mixed", "other"]).catch("residential"),
+      name: z.string().max(60).optional().catch(undefined),
+    }).refine((b) => !!b.corners || (b.u !== undefined && b.v !== undefined), "building needs corners or a centre"),
+    200
+  ),
+  roads: lenient(z.object({ points: lenient(uv, 40).refine((p) => p.length >= 2), kind: z.enum(["road", "path"]).catch("road") }), 60),
+  openAreas: lenient(box.extend({ name: z.string().max(60).optional().catch(undefined) }), 30),
+  parking: lenient(box, 30),
+  guardBooths: lenient(z.object({ u: num, v: num, note: z.string().max(140).optional().catch(undefined) }), 12),
+  darkZones: lenient(box.extend({ reason: z.string().max(160).optional().catch(undefined) }), 20),
 });
 
 export type VisionLayout = z.infer<typeof VisionLayoutSchema>;
@@ -87,7 +107,7 @@ TASK — analyse the society / gated community that occupies most of the image a
  "description": 2-3 sentences: layout, density, approximate tower/house count, how it is entered, notable security-relevant traits (perimeter, open edges, vegetation),
  "boundary": [[u,v],...] polyline of the compound wall / society perimeter (clockwise, 4-40 points; [] if not a walled compound),
  "gates": [{"u","v","kind":"main"|"service"|"pedestrian","name"?}] — entry points on the boundary where internal roads meet outside roads${args.hasStreetMap ? " (name them after the outside road from IMAGE 2 when legible)" : ""},
- "buildings": [{"u","v","widthM","depthM","rotationDeg","floors","category"}] — buildings visible but NOT in the OSM list above (estimate floors from shadow length/roof type: towers 10-30, apartments 4-8, houses 1-3),
+ "buildings": [{"corners":[[u,v],[u,v],[u,v],[u,v]],"floors","category"}] — buildings visible but NOT in the OSM list above. "corners" = the 4 corners of the building's roof outline in order (for an L/U-shaped block, list each rectangular wing as its own building). Trace each building separately, never one box around several. Estimate floors from shadow length/roof type: towers 10-30, apartments 4-8, houses 1-3,
  "roads": [{"points":[[u,v],...],"kind":"road"|"path"}] — internal roads/driveways/footpaths missing from OSM,
  "openAreas": [{"u","v","widthM","depthM","name"?}] — parks, lawns, playgrounds, clubhouse grounds,
  "parking": [{"u","v","widthM","depthM","rotationDeg"}] — surface parking lots,
@@ -98,7 +118,8 @@ Keep lists concise (max ~40 buildings). Return JSON only.`;
 
 export interface MergeResult {
   world: World;
-  added: { buildings: number; roads: number; parks: number; walls: number; gates: number; areas: number; booths: number };
+  /** `rejected`: model buildings dropped as implausible or duplicating mapped ones */
+  added: { buildings: number; roads: number; parks: number; walls: number; gates: number; areas: number; booths: number; rejected: number };
 }
 
 function clamp(v: number, lo: number, hi: number) {
@@ -113,13 +134,55 @@ function distToSeg(p: Vec2, a: Vec2, b: Vec2) {
   return Math.hypot(p.x - (a.x + t * dx), p.z - (a.z + t * dz));
 }
 
-function overlapsBuilding(c: { x: number; z: number; width: number; depth: number }, list: Building[]) {
+type Box = Pick<Building, "x" | "z" | "width" | "depth" | "rotation">;
+
+function insideBox(b: Box, p: Vec2, shrink = 0) {
+  const c = Math.cos(b.rotation);
+  const s = Math.sin(b.rotation);
+  const dx = p.x - b.x;
+  const dz = p.z - b.z;
+  return Math.abs(dx * c - dz * s) <= b.width / 2 - shrink && Math.abs(dx * s + dz * c) <= b.depth / 2 - shrink;
+}
+
+/** Sample points across a rotated box (local grid → world). */
+function boxSamples(b: Box, n = 8): Vec2[] {
+  const c = Math.cos(b.rotation);
+  const s = Math.sin(b.rotation);
+  const out: Vec2[] = [];
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++) {
+      const lx = ((i + 0.5) / n - 0.5) * b.width;
+      const lz = ((j + 0.5) / n - 0.5) * b.depth;
+      out.push({ x: b.x + lx * c + lz * s, z: b.z - lx * s + lz * c });
+    }
+  return out;
+}
+
+/** Rotation-aware: does `c` overlap any listed building by > 25 % of the smaller footprint? */
+function overlapsBuilding(c: Box, list: Building[]) {
+  const cs = boxSamples(c);
   return list.some((b) => {
-    const ox = Math.min(c.x + c.width / 2, b.x + b.width / 2) - Math.max(c.x - c.width / 2, b.x - b.width / 2);
-    const oz = Math.min(c.z + c.depth / 2, b.z + b.depth / 2) - Math.max(c.z - c.depth / 2, b.z - b.depth / 2);
-    if (ox <= 0 || oz <= 0) return false;
-    return (ox * oz) / Math.min(c.width * c.depth, b.width * b.depth) > 0.25;
+    if (Math.hypot(c.x - b.x, c.z - b.z) > (Math.hypot(c.width, c.depth) + Math.hypot(b.width, b.depth)) / 2) return false;
+    const inB = cs.filter((p) => insideBox(b, p)).length / cs.length;
+    const bs = boxSamples(b);
+    const inC = bs.filter((p) => insideBox(c, p)).length / bs.length;
+    return Math.max(inB, inC) > 0.25;
   });
+}
+
+/** Metres of mapped (non-path) road centreline running through the box interior. */
+function roadLengthInside(c: Box, roads: Road[]) {
+  let len = 0;
+  for (const r of roads) {
+    if (r.category === "path") continue;
+    for (let k = 1; k < r.points.length; k++) {
+      const a = r.points[k - 1];
+      const b = r.points[k];
+      const L = Math.hypot(b.x - a.x, b.z - a.z);
+      for (let t = 1; t < L; t += 2) if (insideBox(c, { x: a.x + ((b.x - a.x) * t) / L, z: a.z + ((b.z - a.z) * t) / L }, 1)) len += 2;
+    }
+  }
+  return len;
 }
 
 /** Merge a validated Gemini layout into an (OSM) world. OSM geometry wins; Gemini fills gaps. */
@@ -141,22 +204,47 @@ export function mergeVisionLayout(base: World, layout: VisionLayout): MergeResul
     site: base.site ? { ...base.site } : { walls: [], gates: [], areas: [], booths: [] },
   };
   const site = world.site as SiteLayers;
-  const added = { buildings: 0, roads: 0, parks: 0, walls: 0, gates: 0, areas: 0, booths: 0 };
+  const added = { buildings: 0, roads: 0, parks: 0, walls: 0, gates: 0, areas: 0, booths: 0, rejected: 0 };
 
+  let rejected = 0;
   layout.buildings.forEach((b, i) => {
-    const c = pt(b.u, b.v);
-    const width = size(b.widthM, 14, 120);
-    const depth = size(b.depthM, 14, 120);
-    if (overlapsBuilding({ ...c, width, depth }, world.buildings)) return;
+    let fit: Box | null = null;
+    if (b.corners && b.corners.length >= 3) {
+      const o = orientedBox(b.corners.map(([u, v]) => pt(u, v)));
+      fit = { ...o, width: clamp(o.width, 2, 150), depth: clamp(o.depth, 2, 150) };
+    } else if (b.u !== undefined && b.v !== undefined) {
+      // legacy centre + size: the long side follows rotationDeg whichever field the model put it in
+      const c = pt(b.u, b.v);
+      const a = size(b.widthM, 14, 120);
+      const d = size(b.depthM, 14, 120);
+      fit = { ...c, width: Math.max(a, d), depth: Math.min(a, d), rotation: rot(b.rotationDeg) };
+    }
+    if (!fit) return;
+    // implausible boxes: sliver, giant slab, or one box swallowing a road
+    const plausible =
+      fit.width * fit.depth >= 12 &&
+      fit.width / Math.max(1, fit.depth) <= 9 &&
+      fit.width * fit.depth <= 9000 &&
+      roadLengthInside(fit, base.roads) < 8;
+    // model placement is noisy (~30 % precision in our benchmark vs OSM): only fill true gaps —
+    // no mapped building (OSM / ML footprints) within ~12 m of this one (0.7·half-diagonal ≈ box extent)
+    const half = (b: Box) => 0.7 * Math.hypot(b.width, b.depth) / 2;
+    const f = fit;
+    const inGap = !base.buildings.some((o) => Math.hypot(o.x - f.x, o.z - f.z) < half(f) + half(o) + 12);
+    if (!plausible || !inGap || overlapsBuilding(fit, world.buildings)) {
+      rejected += 1;
+      return;
+    }
+    const { width, depth } = fit;
     const floors = Math.round(clamp(b.floors ?? 3, 1, 45));
     world.buildings.push({
       id: `bd_ai_${i}`,
       name: b.name,
-      x: c.x,
-      z: c.z,
+      x: fit.x,
+      z: fit.z,
       width,
       depth,
-      rotation: rot(b.rotationDeg),
+      rotation: fit.rotation,
       height: floors * 3,
       floors,
       category: b.category as BuildingCategory,
@@ -183,8 +271,11 @@ export function mergeVisionLayout(base: World, layout: VisionLayout): MergeResul
     added.parks += 1;
   });
 
-  if (layout.boundary.length >= 3) {
-    site.walls = [...site.walls, { id: "wl_ai_boundary", points: layout.boundary.map(([u, v]) => pt(u, v)), closed: true, height: 2.4, inferred: true }];
+  added.rejected = rejected;
+  // a "boundary" covering a sliver of the image is a misread, not the compound wall
+  const boundaryPts = layout.boundary.map(([u, v]) => pt(u, v));
+  if (layout.boundary.length >= 3 && polygonArea(boundaryPts) >= 0.04 * W * D) {
+    site.walls = [...site.walls, { id: "wl_ai_boundary", points: boundaryPts, closed: true, height: 2.4, inferred: true }];
     added.walls += 1;
   }
   site.gates = [

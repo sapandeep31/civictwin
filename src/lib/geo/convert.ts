@@ -5,13 +5,14 @@
  *   x = (lon − lon0) · cos(lat0) · 111320
  *   z = −(lat − lat0) · 111320   (z grows southward, matching three.js)
  *
- * Building footprints are simplified to their axis-aligned bounding
- * rectangle (documented inference — heights may also be inferred).
+ * Building footprints are fitted as rotated rectangles (split into wings
+ * for L/U/cross shapes — see footprint.ts); heights may be inferred.
  */
 
 import type { Building, Facility, Road, World } from "../world/types";
 import type { OsmFeatureBundle } from "./osm";
 import { seededId } from "../world/ids";
+import { fitFootprint } from "./footprint";
 
 export function convertOsmToWorld(
   bundle: OsmFeatureBundle,
@@ -57,17 +58,15 @@ export function convertOsmToWorld(
   const buildings: Building[] = [];
   let bn = 0;
   let inferredHeights = 0;
+  let splitOutlines = 0;
   for (const b of bundle.buildings) {
     const pts = b.polygon.map(([la, lo]) => proj(la, lo));
-    const xs = pts.map((p) => p.x);
-    const zs = pts.map((p) => p.z);
-    const x0 = Math.min(...xs);
-    const x1 = Math.max(...xs);
-    const z0 = Math.min(...zs);
-    const z1 = Math.max(...zs);
-    const w = x1 - x0;
-    const d = z1 - z0;
-    if (w < 2 || d < 2) continue;
+    if (pts.length < 3) continue;
+    // tight rotated box(es) instead of an axis-aligned bbox (which inflates tilted / L-shaped blocks)
+    const fit = fitFootprint(pts);
+    const parts = fit.parts.filter((p) => p.width >= 2 && p.depth >= 2);
+    if (!parts.length) continue;
+    if (parts.length > 1) splitOutlines += 1;
     let height: number;
     let floors: number;
     let inferred = false;
@@ -83,19 +82,21 @@ export function convertOsmToWorld(
       inferred = true;
       inferredHeights += 1;
     }
-    buildings.push({
-      id: `bd_${b.id}`,
-      name: b.name,
-      x: (x0 + x1) / 2,
-      z: (z0 + z1) / 2,
-      width: w,
-      depth: d,
-      rotation: 0,
-      height,
-      floors,
-      category: "residential",
-      occupancy: Math.max(2, Math.round((w * d) / 55) * 2),
-      inferred,
+    parts.forEach((p, k) => {
+      buildings.push({
+        id: k === 0 ? `bd_${b.id}` : `bd_${b.id}_p${k}`,
+        name: b.name,
+        x: p.x,
+        z: p.z,
+        width: p.width,
+        depth: p.depth,
+        rotation: p.rotation,
+        height,
+        floors,
+        category: "residential",
+        occupancy: Math.max(2, Math.round((p.width * p.depth) / 55) * 2),
+        inferred: inferred || !!b.source,
+      });
     });
     bn += 1;
   }
@@ -156,7 +157,9 @@ export function convertOsmToWorld(
   if (inferredHeights > 0) {
     notes.push(`${inferredHeights} buildings had no height data — a default of 3 floors was inferred and is marked as inferred in the editor.`);
   }
-  notes.push("Building footprints are simplified to bounding rectangles of their mapped outlines.");
+  notes.push(
+    `Building footprints are fitted as rotated rectangles of their mapped outlines${splitOutlines ? ` (${splitOutlines} L/U/cross-shaped outline${splitOutlines === 1 ? "" : "s"} split into wings)` : ""}.`
+  );
   notes.push("No safety infrastructure is created automatically — add streetlights, cameras, and patrols yourself or via the planning assistant.");
 
   return {
