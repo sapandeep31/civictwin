@@ -232,9 +232,6 @@ export default function WelcomeScreen() {
               <p style={{ "--d": "0.4s" } as React.CSSProperties} className="hero-fade mt-3 max-w-md text-pretty text-xs italic leading-relaxed text-slate-400/80">
                 * We suggest starting with the demo society (Launch live demo) &mdash; it&rsquo;s pre-loaded and runs instantly.
               </p>
-              <p style={{ "--d": "0.44s" } as React.CSSProperties} className="hero-fade mt-3 text-xs text-slate-500">
-                Free · no login · runs in your browser · synthetic agents, no real people tracked
-              </p>
             </div>
           </div>
           <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-b from-transparent to-[#060b18]" />
