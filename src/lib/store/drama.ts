@@ -43,7 +43,9 @@ interface DramaState {
 /** Factory so secondary canvases (split replay) get an isolated drama store. */
 export const createDramaStore = () =>
   create<DramaState>((set) => ({
-    followIncident: false,
+    // on by default: a first-time viewer should SEE the incidents, not a tiny far-away map;
+    // grabbing the camera cancels the current fly, and the timeline toggle turns it off
+    followIncident: true,
     setFollowIncident: (v) => set({ followIncident: v }),
     activeBeats: [],
     latestBeat: null,

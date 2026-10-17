@@ -160,7 +160,6 @@ export function convertOsmToWorld(
   notes.push(
     `Building footprints are fitted as rotated rectangles of their mapped outlines${splitOutlines ? ` (${splitOutlines} L/U/cross-shaped outline${splitOutlines === 1 ? "" : "s"} split into wings)` : ""}.`
   );
-  notes.push("No safety infrastructure is created automatically — add streetlights, cameras, and patrols yourself or via the planning assistant.");
 
   return {
     world,

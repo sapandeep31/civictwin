@@ -18,7 +18,7 @@ import type { Vec2 } from "@/lib/world/types";
 import { computeCoverage } from "@/lib/sim/scenarios";
 import { RoadsLayer, BuildingsLayer, FacilitiesLayer, StreetlightsLayer, CamerasLayer, GuardsLayer, createRoadGeometries } from "./layers";
 import { AgentsLayer, EventsLayer, PlaybackTicker } from "./playback";
-import { SiteLayers, fitZoom, DEFAULT_ZOOM } from "./siteLayers";
+import { SiteLayers, contentExtent, fitZoom, DEFAULT_ZOOM } from "./siteLayers";
 import { DramaLayer } from "./drama";
 import { FocusFlyer } from "./focusFlyer";
 import { PatrolRoutes, PatrolHUD } from "./patrolEditor";
@@ -578,9 +578,12 @@ function ViewPresetButtons() {
     setActiveView(v);
     const controls = (window as any).__praesidiumControls?.current;
     if (!controls) return;
+    // geo twins are framed on the society itself, not the captured box's centre
+    const pr = useEditor.getState().project;
+    const c = pr?.source.geo ? contentExtent(pr.world) : { cx: 0, cz: 0 };
     if (v === "isometric") {
-      controls.target.set(0, 0, 0);
-      controls.object.position.set(190, 170, 190);
+      controls.target.set(c.cx, 0, c.cz);
+      controls.object.position.set(c.cx + 190, 170, c.cz + 190);
       controls.object.zoom = fitZoom(controls.object);
     } else if (v === "road") {
       // Zoomed-in street corridor perspective focused on road network & lighting
@@ -589,8 +592,8 @@ function ViewPresetButtons() {
       controls.object.zoom = 4.4;
     } else if (v === "topdown") {
       // 2D orthographic map view looking straight down
-      controls.target.set(0, 0, 0);
-      controls.object.position.set(0.01, 320, 0.01);
+      controls.target.set(c.cx, 0, c.cz);
+      controls.object.position.set(c.cx + 0.01, 320, c.cz + 0.01);
       controls.object.zoom = fitZoom(controls.object);
     }
     controls.object.updateProjectionMatrix();

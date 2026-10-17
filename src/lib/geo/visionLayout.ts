@@ -37,6 +37,8 @@ function lenient<T extends z.ZodTypeAny>(item: T, max: number) {
 export const VisionLayoutSchema = z.object({
   societyType: z.string().max(60).catch("other"),
   description: z.string().max(800).catch(""),
+  /** typical floor count of the main residential blocks (fills mapped buildings with no height data) */
+  typicalFloors: num.optional().catch(undefined),
   boundary: lenient(uv, 80),
   gates: lenient(z.object({ u: num, v: num, kind: z.enum(["main", "service", "pedestrian"]).catch("main"), name: z.string().max(60).optional().catch(undefined) }), 12),
   buildings: lenient(
@@ -105,6 +107,7 @@ TASK — analyse the society / gated community that occupies most of the image a
 {
  "societyType": one of "gated_highrise" | "gated_lowrise" | "plotted_colony" | "villa_enclave" | "mixed_street" | "commercial" | "other",
  "description": 2-3 sentences: layout, density, approximate tower/house count, how it is entered, notable security-relevant traits (perimeter, open edges, vegetation),
+ "typicalFloors": number — typical floor count of the society's main residential buildings (from shadow length, roof detail, the place's known profile): towers 12-30, apartment blocks 4-8, villas/houses 1-3,
  "boundary": [[u,v],...] polyline of the compound wall / society perimeter (clockwise, 4-40 points; [] if not a walled compound),
  "gates": [{"u","v","kind":"main"|"service"|"pedestrian","name"?}] — entry points on the boundary where internal roads meet outside roads${args.hasStreetMap ? " (name them after the outside road from IMAGE 2 when legible)" : ""},
  "buildings": [{"corners":[[u,v],[u,v],[u,v],[u,v]],"floors","category"}] — buildings visible but NOT in the OSM list above. "corners" = the 4 corners of the building's roof outline in order (for an L/U-shaped block, list each rectangular wing as its own building). Trace each building separately, never one box around several. Estimate floors from shadow length/roof type: towers 10-30, apartments 4-8, houses 1-3,
@@ -119,7 +122,8 @@ Keep lists concise (max ~40 buildings). Return JSON only.`;
 export interface MergeResult {
   world: World;
   /** `rejected`: model buildings dropped as implausible or duplicating mapped ones */
-  added: { buildings: number; roads: number; parks: number; walls: number; gates: number; areas: number; booths: number; rejected: number };
+  /** `heights`: mapped buildings whose missing height was set from the typical floor count */
+  added: { buildings: number; roads: number; parks: number; walls: number; gates: number; areas: number; booths: number; rejected: number; heights: number };
 }
 
 function clamp(v: number, lo: number, hi: number) {
@@ -204,7 +208,19 @@ export function mergeVisionLayout(base: World, layout: VisionLayout): MergeResul
     site: base.site ? { ...base.site } : { walls: [], gates: [], areas: [], booths: [] },
   };
   const site = world.site as SiteLayers;
-  const added = { buildings: 0, roads: 0, parks: 0, walls: 0, gates: 0, areas: 0, booths: 0, rejected: 0 };
+  const added = { buildings: 0, roads: 0, parks: 0, walls: 0, gates: 0, areas: 0, booths: 0, rejected: 0, heights: 0 };
+
+  // mapped buildings without height data default to 3 floors (9 m) — in a tower society that flattens
+  // every block, so use the model's typical floor count for residential-sized footprints
+  const tf = layout.typicalFloors ? Math.round(clamp(layout.typicalFloors, 1, 40)) : null;
+  if (tf && tf !== 3) {
+    const minArea = tf >= 8 ? 250 : 60; // guard rooms, kiosks, clubhouse annexes keep the low default
+    world.buildings = world.buildings.map((b) => {
+      if (!b.inferred || b.floors !== 3 || b.height !== 9 || b.width * b.depth < minArea) return b;
+      added.heights += 1;
+      return { ...b, floors: tf, height: tf * 3, occupancy: Math.max(2, Math.round(((b.width * b.depth) / 55) * Math.min(tf, 20) * 0.6) * 2) };
+    });
+  }
 
   let rejected = 0;
   layout.buildings.forEach((b, i) => {

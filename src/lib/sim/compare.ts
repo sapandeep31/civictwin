@@ -15,6 +15,7 @@ import { runSimulation } from "./engine";
 import { computeMetrics } from "./metrics";
 import { clockLabel } from "./runner";
 import { EVENT_TYPE_LABEL, eventTypeLabel, outcomeRank, outcomeShort } from "./labels";
+import { describePlace } from "../ai/schema";
 
 /* ------------------------------------------------------------------ */
 /* Risk index                                                          */
@@ -128,7 +129,6 @@ export interface WorldChange {
 }
 
 const near = (a: number, b: number) => Math.abs(a - b) < 0.01;
-const r0 = (v: number) => Math.round(v);
 
 function lightChanged(a: Streetlight, b: Streetlight) {
   return !near(a.x, b.x) || !near(a.z, b.z) || a.on !== b.on || !near(a.brightness, b.brightness) || !near(a.radius, b.radius);
@@ -149,14 +149,14 @@ export function detectChanges(base: StoredRun, int: StoredRun): WorldChange[] {
     if (!b) {
       out.push({
         id: `add-${l.id}`,
-        label: `New streetlight at (${r0(l.x)}, ${r0(l.z)})`,
+        label: `New streetlight ${describePlace(l.x, l.z, iw)}`,
         costInr: COST_ASSUMPTIONS.streetlightInstallInr,
         apply: (w) => void w.streetlights.push(deepClone(l)),
       });
     } else if (lightChanged(b, l)) {
       out.push({
         id: `edit-${l.id}`,
-        label: !b.on && l.on ? `Repair streetlight ${l.id}` : `Move / adjust streetlight ${l.id}`,
+        label: !b.on && l.on ? `Repair streetlight ${describePlace(l.x, l.z, iw)}` : `Move / adjust streetlight ${describePlace(b.x, b.z, iw)}`,
         costInr: Math.round(COST_ASSUMPTIONS.streetlightInstallInr * 0.1),
         apply: (w) => {
           const i = w.streetlights.findIndex((x) => x.id === l.id);
@@ -170,14 +170,14 @@ export function detectChanges(base: StoredRun, int: StoredRun): WorldChange[] {
     if (!b) {
       out.push({
         id: `add-${c.id}`,
-        label: `New CCTV camera at (${r0(c.x)}, ${r0(c.z)})`,
+        label: `New CCTV camera ${describePlace(c.x, c.z, iw)}`,
         costInr: COST_ASSUMPTIONS.cameraInstallInr,
         apply: (w) => void w.cameras.push(deepClone(c)),
       });
     } else if (camChanged(b, c)) {
       out.push({
         id: `edit-${c.id}`,
-        label: `Re-aim / move camera ${c.id}`,
+        label: `${!b.active && c.active ? "Repair" : "Re-aim / move"} camera ${describePlace(b.x, b.z, iw)}`,
         costInr: Math.round(COST_ASSUMPTIONS.cameraInstallInr * 0.1),
         apply: (w) => {
           const i = w.cameras.findIndex((x) => x.id === c.id);
@@ -209,9 +209,9 @@ export function detectChanges(base: StoredRun, int: StoredRun): WorldChange[] {
   }
   // removals (rare, but keep the ablation honest)
   for (const l of bw.streetlights) if (!iw.streetlights.some((x) => x.id === l.id))
-    out.push({ id: `rm-${l.id}`, label: `Remove streetlight ${l.id}`, costInr: 0, apply: (w) => void (w.streetlights = w.streetlights.filter((x) => x.id !== l.id)) });
+    out.push({ id: `rm-${l.id}`, label: `Remove streetlight ${describePlace(l.x, l.z, bw)}`, costInr: 0, apply: (w) => void (w.streetlights = w.streetlights.filter((x) => x.id !== l.id)) });
   for (const c of bw.cameras) if (!iw.cameras.some((x) => x.id === c.id))
-    out.push({ id: `rm-${c.id}`, label: `Remove camera ${c.id}`, costInr: 0, apply: (w) => void (w.cameras = w.cameras.filter((x) => x.id !== c.id)) });
+    out.push({ id: `rm-${c.id}`, label: `Remove camera ${describePlace(c.x, c.z, bw)}`, costInr: 0, apply: (w) => void (w.cameras = w.cameras.filter((x) => x.id !== c.id)) });
 
   const bg = base.scenario.guardCount;
   const ig = int.scenario.guardCount;
@@ -226,6 +226,14 @@ export function detectChanges(base: StoredRun, int: StoredRun): WorldChange[] {
     });
   }
   return out;
+}
+
+/**
+ * What the current setup costs on top of a baseline — the ONE cost figure used by
+ * the plan bar, the compare view and the report (same rules as the per-change table).
+ */
+export function planCostInr(base: { world: World; scenario: ScenarioConfig }, now: { world: World; scenario: ScenarioConfig }): number {
+  return detectChanges(base as StoredRun, now as StoredRun).reduce((s, c) => s + c.costInr, 0);
 }
 
 /* ------------------------------------------------------------------ */

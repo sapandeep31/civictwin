@@ -10,7 +10,7 @@ import { useEditor } from "@/lib/store/editor";
 import { Button } from "@/components/ui/button";
 import { exportProjectJson, parseProject } from "@/lib/world/serialize";
 import { downloadJson } from "@/lib/storage/projects";
-import { runIntervention, runBaseline, prepareReportData } from "@/lib/run-actions";
+import { runIntervention, runBaseline, prepareReportData, setupChangedSinceBaseline } from "@/lib/run-actions";
 import { useToast } from "@/hooks/use-toast";
 import { useIntel } from "@/lib/ai/intelStore";
 import { useNarration, useNarrationDriver } from "@/lib/captions/narrate";
@@ -44,6 +44,15 @@ export default function TopBar() {
   const isDemo = project.source.kind === "demo";
 
   const handleRun = async (kind: "baseline" | "intervention") => {
+    // re-running the baseline after edits makes the edits "today's setup" and drops the comparison —
+    // easy to do by accident right after adding fixes, so ask first
+    const p = useEditor.getState().project;
+    if (kind === "baseline" && p && setupChangedSinceBaseline(p)) {
+      const ok = window.confirm(
+        "You've changed the society since the last run.\n\nOK = make these changes the new “today's setup” (the old baseline and comparison are replaced).\nCancel = keep the baseline — use “Run intervention” to test your changes against it."
+      );
+      if (!ok) return;
+    }
     setBusy(kind);
     // yield a frame so the UI can show the busy state
     await new Promise((r) => setTimeout(r, 30));

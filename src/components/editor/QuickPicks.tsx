@@ -128,7 +128,7 @@ export default function QuickPicks({ appliedIds, onApply, onRemove, onShow, onEx
 
   // fresh baseline → fresh picks, automatically the next time the panel is open
   const panelOpen = useEditor((s) => s.assistantOpen);
-  const baselineKey = baseline ? `${baseline.seed}:${baseline.events.length}:${baseline.metrics.dramaIncidents}` : null;
+  const baselineKey = baseline?.id ?? null;
   const rankedFor = useRef<string | null>(null);
   useEffect(() => {
     if (!baselineKey) {
@@ -189,7 +189,29 @@ export default function QuickPicks({ appliedIds, onApply, onRemove, onShow, onEx
     );
   }
 
-  const visible = rows ? (showAll ? rows : rows.slice(0, SHOWN)) : [];
+  // once the same-night tests are in, a pick that made the night worse must not stay near the top
+  const ordered = rows
+    ? rows
+        .map((r, i) => ({ r, i, v: verified[r.id] }))
+        .sort((a, b) => {
+          const worse = (x: typeof a) => (x.v && x.v !== "running" && x.v.riskReduced < 0 ? 1 : 0);
+          return worse(a) - worse(b) || a.i - b.i;
+        })
+        .map((x) => x.r)
+    : null;
+  // identical titles ("CCTV on blind-spot Mugging spot" ×2) get a compass hint so they can be told apart
+  const titleCount = new Map<string, number>();
+  for (const r of ordered ?? []) titleCount.set(cleanLabel(r.label), (titleCount.get(cleanLabel(r.label)) ?? 0) + 1);
+  const W = project.world.bounds.width;
+  const D = project.world.bounds.depth;
+  const where = (r: Row) => {
+    if (r.kind === "guard" || r.kind === "patrol") return "";
+    const ns = r.z < -D * 0.15 ? "north" : r.z > D * 0.15 ? "south" : "";
+    const ew = r.x < -W * 0.15 ? "west" : r.x > W * 0.15 ? "east" : "";
+    return ns || ew ? ` · ${ns && ew ? `${ns}-${ew}` : ns || ew} side` : " · centre";
+  };
+  const title = (r: Row) => cleanLabel(r.label) + ((titleCount.get(cleanLabel(r.label)) ?? 0) > 1 ? where(r) : "");
+  const visible = ordered ? (showAll ? ordered : ordered.slice(0, SHOWN)) : [];
 
   return (
     <section data-testid="jev-quickpicks">
@@ -257,8 +279,8 @@ export default function QuickPicks({ appliedIds, onApply, onRemove, onShow, onEx
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-2">
                       <div className="text-[11.5px] font-semibold leading-snug text-[#1d2430]">
-                        {i === 0 && !isApplied && <span className="mr-1 text-[#b45309]">★</span>}
-                        {cleanLabel(r.label)}
+                        {i === 0 && !isApplied && !(v && v !== "running" && v.riskReduced < 0) && <span className="mr-1 text-[#b45309]">★</span>}
+                        {title(r)}
                       </div>
                       <div className="shrink-0 text-[11px] font-semibold text-[#1d2430]">{r.costInr > 0 ? fmtInr(r.costInr) : "Free"}</div>
                     </div>
@@ -286,6 +308,10 @@ export default function QuickPicks({ appliedIds, onApply, onRemove, onShow, onEx
                             ✓ Tested: risk {v.riskBefore} → {v.riskAfter}
                             {v.caughtDelta > 0 ? ` · ${v.caughtDelta} more caught` : ""}
                           </span>
+                        ) : v.riskReduced < 0 ? (
+                          <span className="font-medium text-[#b45309]">
+                            ⚠ Tested: made this night worse (risk {v.riskBefore} → {v.riskAfter}) — offenders shifted elsewhere
+                          </span>
                         ) : (
                           <span className="text-[#8a8272]">
                             Tested: no change in risk on this night ({v.riskBefore} → {v.riskAfter})
@@ -298,7 +324,7 @@ export default function QuickPicks({ appliedIds, onApply, onRemove, onShow, onEx
                         <>
                           <span className="text-[10.5px] font-semibold text-[#0f766e]">✓ Added to your plan</span>
                           <button
-                            onClick={() => onShow(proposal, cleanLabel(r.label))}
+                            onClick={() => onShow(proposal, title(r))}
                             className="ml-auto rounded px-1.5 py-0.5 text-[10.5px] text-[#0f766e] hover:bg-[#e6f4f1]"
                           >
                             ⌖ Show
@@ -312,12 +338,12 @@ export default function QuickPicks({ appliedIds, onApply, onRemove, onShow, onEx
                           <Button
                             size="sm"
                             className="h-6 bg-[#0f766e] px-2.5 text-[10.5px] text-white hover:bg-[#115e59]"
-                            onClick={() => onApply(r.id, cleanLabel(r.label), r.costInr, proposal)}
+                            onClick={() => onApply(r.id, title(r), r.costInr, proposal)}
                           >
                             + Add to plan
                           </Button>
                           <button
-                            onClick={() => onShow(proposal, cleanLabel(r.label))}
+                            onClick={() => onShow(proposal, title(r))}
                             className="rounded px-1.5 py-0.5 text-[10.5px] text-[#5c6470] hover:bg-[#f4f2ec]"
                             title="Fly the map to where this would go"
                           >

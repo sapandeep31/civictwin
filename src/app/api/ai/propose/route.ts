@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { callGemini, geminiConfigured } from "@/lib/ai/gemini";
+import { callGemini, geminiConfigured, parseJsonLoose } from "@/lib/ai/gemini";
 import { validateProposal, type Proposal } from "@/lib/ai/schema";
 import { deterministicRecommendation } from "@/lib/ai/recommend";
 import { OUTCOME_GLOSSARY, outcomeLabel } from "@/lib/sim/labels";
@@ -191,6 +191,7 @@ Rules:
 - Only reference streetlight/camera/guard IDs that appear in the summary. sampleRoadMidpoints are safe positions on the walkable network.
 - Prefer placing new streetlights ON or NEAR walkable paths (use sampleRoadMidpoints or facility positions as anchors).
 - Never claim crime prevention; speak in "modeled coverage" and "estimated response" terms.
+- Write title, rationale, expectedEffects and limitations for an RWA committee: plain English, short. Never show internal codes or IDs (no "perp_escaped", "escaped_on_cctv", "gd_inf_0", "sl_…", coordinates) — say "escaped through a blind spot", "the gate guard", "near the main gate" instead.
 - ${OUTCOME_GLOSSARY} Prioritise cameras covering spots where incidents ended "perp_escaped" (blind spots), and patrol/guard changes where guards were late or absent.
 - Do NOT use set_scenario to change eventsPerHour, lightingOutageFraction or ambientVisibility — those describe the night being tested, not something the society can buy; changing them would make the comparison unfair. set_scenario may only change guardCount.`;
 }
@@ -205,7 +206,9 @@ async function callGeminiProposal(
     prompt: buildPrompt(project, baselineRun, message, intel),
     json: true,
     temperature: 0.3,
-    maxOutputTokens: 4096,
+    // thinking tokens count against this budget — 4096 truncated replies mid-array
+    maxOutputTokens: 8192,
+    thinkingLevel: "low",
     timeoutMs: 30000,
   });
   return parseJsonLooseStrict(r.text);
@@ -252,12 +255,14 @@ function parseJsonLooseStrict(text: string): unknown {
       try {
         return JSON.parse(slice);
       } catch {
-        // Strip trailing commas before closing braces/brackets
-        const cleaned = slice.replace(/,\s*([\]}])/g, "$1");
-        return JSON.parse(cleaned);
+        /* fall through to the shared repair (trailing commas, truncated replies) */
       }
     }
-    throw new Error("Model response did not contain valid JSON.");
+    try {
+      return parseJsonLoose(candidate);
+    } catch {
+      throw new Error("Model response did not contain valid JSON.");
+    }
   }
 }
 

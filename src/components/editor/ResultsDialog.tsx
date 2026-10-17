@@ -8,7 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { ablateStreaming } from "@/lib/sim/verifyClient";
-import { fmtInr, getCachedAblation, headlineDiff, RISK_EXPLAINER, type AblationResult } from "@/lib/sim/compare";
+import { fmtInr, getCachedAblation, headlineDiff, planCostInr, riskIndex, RISK_EXPLAINER, type AblationResult } from "@/lib/sim/compare";
 import { eventTypeLabel } from "@/lib/sim/labels";
 import type { StoredRun } from "@/lib/world/types";
 
@@ -121,7 +121,7 @@ export function ResultsDialog() {
       <DialogContent className="max-h-[88vh] overflow-y-auto bg-[#f7f5f1] sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-[#1d2430]">
-            Results — {run.label}
+            {run.label === "baseline" ? "Tonight's results — today's setup" : "Results — with your plan"} (simulated)
             <span className="rounded bg-[#eef4f0] px-2 py-0.5 text-[10px] font-medium text-[#2e7d5b]">
               seed {run.seed} · engine {run.engineVersion}
             </span>
@@ -132,6 +132,24 @@ export function ResultsDialog() {
         </DialogHeader>
 
         <div className="space-y-4 text-sm">
+          {run.label === "baseline" && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#cfe2d7] bg-[#eef4f0] px-3 py-2.5">
+              <div className="text-[13px] text-[#1d2430]">
+                <span className="font-semibold">{m.dramaIncidents ?? m.eventsTotal} incidents</span> on this simulated night ·{" "}
+                {m.perpsCaughtPct ?? m.resolutionRatePct}% of offenders caught. Find the cheapest fixes that change this.
+              </div>
+              <Button
+                size="sm"
+                className="h-8 bg-[#0f766e] text-xs text-white hover:bg-[#115e59]"
+                onClick={() => {
+                  setOpen(false);
+                  useEditor.getState().setAssistantOpen(true);
+                }}
+              >
+                ✦ Find fixes with the AI planner
+              </Button>
+            </div>
+          )}
           {/* metric cards */}
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <MetricCard
@@ -229,9 +247,9 @@ export function ResultsDialog() {
           </div>
 
           {/* assumptions */}
-          <div className="rounded-lg border border-[#e3ded4] bg-white p-3 text-[11px] leading-relaxed text-[#5c6470]">
-            <div className="mb-1 text-xs font-semibold text-[#1d2430]">Assumptions & uncertainty</div>
-            <ul className="list-disc space-y-0.5 pl-4">
+          <details className="rounded-lg border border-[#e3ded4] bg-white p-3 text-[11px] leading-relaxed text-[#5c6470]">
+            <summary className="cursor-pointer text-xs font-semibold text-[#1d2430]">How these numbers are modelled (assumptions &amp; limits)</summary>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4">
               <li>
                 Lighting: illumination = Σ brightness·(1−d/radius)<sup>1.5</sup> over active lamps; the lit
                 threshold rises as ambient visibility ({Math.round(run.scenario.ambientVisibility * 100)}%) falls. A geometric
@@ -242,7 +260,7 @@ export function ResultsDialog() {
               <li>Response times: estimated from network travel distance at {run.scenario.guardSpeed} m/s; unreachable or unguarded cases are recorded explicitly, never averaged in.</li>
               <li>Outcomes depend on scenario parameters, synthetic agents and geometry quality. Higher modeled coverage does not prove real crime reduction.</li>
             </ul>
-          </div>
+          </details>
 
           {/* actions */}
           <div className="flex flex-wrap items-center gap-2">
@@ -344,39 +362,48 @@ export function CompareDialog() {
     );
   }
 
-  const cost = intervention.metrics.interventionCostInr;
+  // one cost figure everywhere (plan bar, this view, the table, the report)
+  const cost: number | null = planCostInr(baseline, intervention);
+  const riskBefore = riskIndex(baseline.events);
+  const riskAfter = riskIndex(intervention.events);
+  const net = Math.round((riskBefore - riskAfter) * 10) / 10;
+  const verdict = net > 0.05 ? "better" : net < -0.05 ? "worse" : "same";
   const litDelta = intervention.metrics.pathLenLitPct - baseline.metrics.pathLenLitPct;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className="max-h-[92vh] overflow-y-auto bg-[#f7f5f1] sm:max-w-6xl">
         <DialogHeader>
-          <DialogTitle className="text-[#1d2430]">Same night, one change — baseline vs intervention</DialogTitle>
+          <DialogTitle className="text-[#1d2430]">Same night: today&apos;s setup vs your plan</DialogTitle>
           <DialogDescription className="text-xs text-[#5c6470]">
-            Both runs use the same seed: the same people, the same perpetrators, the same night. Only your changes differ.
+            Both runs replay the same simulated night — the same people, the same offenders. Only your changes differ.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 text-sm">
-          {headline && (
-            <div
-              className={`rounded-lg border px-4 py-3 ${
-                headline.improved ? "border-[#bfe0cf] bg-[#eef7f2]" : headline.worse ? "border-[#f0c9c9] bg-[#fdf3f3]" : "border-[#e3ded4] bg-white"
-              }`}
-            >
-              <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-[#8a8272]">
-                Headline difference (simulated)
-                <span
-                  className={`rounded px-1.5 py-0.5 text-[9px] text-white ${
-                    headline.improved ? "bg-[#2e7d5b]" : headline.worse ? "bg-[#c23b3b]" : "bg-[#8a8272]"
-                  }`}
-                >
-                  {headline.improved ? "better" : headline.worse ? "worse — rethink this change" : "no clear change"}
-                </span>
-              </div>
-              <div className="mt-0.5 text-lg font-bold text-[#1d2430]">{headline.text}</div>
+          {/* overall verdict first — it must agree with the "All changes together" row below */}
+          <div
+            className={`rounded-lg border px-4 py-3 ${
+              verdict === "better" ? "border-[#bfe0cf] bg-[#eef7f2]" : verdict === "worse" ? "border-[#f0c9c9] bg-[#fdf3f3]" : "border-[#e3ded4] bg-white"
+            }`}
+          >
+            <div className="flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-[#8a8272]">
+              Overall (simulated)
+              <span className={`rounded px-1.5 py-0.5 text-[9px] text-white ${verdict === "better" ? "bg-[#2e7d5b]" : verdict === "worse" ? "bg-[#c23b3b]" : "bg-[#8a8272]"}`}>
+                {verdict === "better" ? "safer night" : verdict === "worse" ? "riskier night — rethink the plan" : "no clear change"}
+              </span>
             </div>
-          )}
+            <div className="mt-0.5 text-lg font-bold text-[#1d2430]">
+              Risk {riskBefore} → {riskAfter}
+              {cost ? <span className="font-medium text-[#5c6470]"> · {fmtInr(cost)}</span> : <span className="font-medium text-[#5c6470]"> · free</span>}
+            </div>
+            {headline && (
+              <div className="mt-1 text-[13px] text-[#1d2430]">
+                <span className="text-[#8a8272]">Biggest single change: </span>
+                {headline.text}
+              </div>
+            )}
+          </div>
 
           {showReplay ? (
             <SameNightReplay baseline={baseline} intervention={intervention} headline={headline} />
@@ -578,10 +605,17 @@ export function CostEffectTable({ baseline, intervention }: { baseline: StoredRu
           <tbody>
             {[...res.rows, res.combined].map((r, i) => {
               const all = r.id === "all";
+              // a paid change that made the night worse on its own is the one to drop first
+              const drop = !all && r.costInr > 0 && r.riskReduced < 0;
+              const dud = !all && r.costInr > 0 && r.riskReduced === 0 && !r.responseSavedSec;
               return (
-                <tr key={r.id} className={`border-b border-[#f1ede4] last:border-0 ${all ? "bg-[#faf8f4] font-semibold" : ""}`}>
+                <tr key={r.id} className={`border-b border-[#f1ede4] last:border-0 ${all ? "bg-[#faf8f4] font-semibold" : drop ? "bg-[#fdf3f3]" : ""}`}>
                   <td className="px-3 py-1.5 text-[#8a8272]">{all ? "Σ" : i + 1}</td>
-                  <td className="px-3 py-1.5 text-[#1d2430]">{r.label}</td>
+                  <td className="px-3 py-1.5 text-[#1d2430]">
+                    {r.label}
+                    {drop && <span className="ml-1.5 text-[10px] font-semibold text-[#c23b3b]">✕ made it worse — drop it</span>}
+                    {dud && <span className="ml-1.5 text-[10px] text-[#8a8272]">no effect on this night</span>}
+                  </td>
                   <td className="px-3 py-1.5 text-right text-[#5c6470]">{r.costInr ? fmtInr(r.costInr) : "free"}</td>
                   <td className={`px-3 py-1.5 text-right ${r.riskReduced > 0 ? "text-[#2e7d5b]" : r.riskReduced < 0 ? "text-[#c23b3b]" : "text-[#8a8272]"}`}>
                     {r.riskReduced === 0 ? "—" : `${r.riskReduced > 0 ? "−" : "+"}${Math.abs(r.riskReduced)} pts`}

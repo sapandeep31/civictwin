@@ -128,7 +128,28 @@ describe("AI proposal application", () => {
       expectedEffects: [],
       limitations: [],
     });
-    expect(lines[0]).toMatch(/Add streetlight at \(1, 2\)/);
+    expect(lines[0]).toMatch(/Add a streetlight at \(1, 2\)/);
     expect(lines[1]).toMatch(/patrol route/);
+  });
+
+  it("names places and guards instead of coordinates and ids when given the world", () => {
+    const p = makeDemoProject();
+    const g = p.world.guards[0];
+    const gate = p.world.site?.gates[0];
+    const lines = describeOps(
+      {
+        title: "t",
+        rationale: "r",
+        ops: [
+          { op: "add_camera", x: gate ? gate.x + 3 : 0, z: gate ? gate.z : 0 },
+          { op: "set_patrol", guardId: g.id, waypoints: [{ x: 0, z: 0 }, { x: 1, z: 1 }] },
+        ],
+        expectedEffects: [],
+        limitations: [],
+      },
+      p.world
+    );
+    expect(lines.join(" ")).not.toMatch(/\(\-?\d+, \-?\d+\)|gd_/);
+    expect(lines[1]).toContain(g.name);
   });
 });

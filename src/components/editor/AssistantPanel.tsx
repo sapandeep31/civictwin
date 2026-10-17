@@ -16,7 +16,7 @@ import { describeOps, type Proposal } from "@/lib/ai/schema";
 import { cn } from "@/lib/utils";
 import { useIntel } from "@/lib/ai/intelStore";
 import { useFocus } from "@/lib/store/focus";
-import { fmtInr } from "@/lib/sim/compare";
+import { fmtInr, planCostInr } from "@/lib/sim/compare";
 import QuickPicks from "./QuickPicks";
 import IntelChip from "./IntelChip";
 import { compactIntel } from "@/lib/ai/context";
@@ -93,7 +93,7 @@ export default function AssistantPanel() {
   // drop plan entries that were undone elsewhere
   const world = project?.world;
   const livePlan = useMemo(() => (world ? plan.filter((p) => isLive(p.change, world)) : []), [plan, world]);
-  const baselineKey = baselineRun ? `${baselineRun.seed}:${baselineRun.events.length}:${baselineRun.metrics.dramaIncidents}` : "none";
+  const baselineKey = baselineRun?.id ?? "none";
   const pickPrefix = `qp|${baselineKey}|`;
   const appliedPickIds = useMemo(
     () => new Set(livePlan.filter((p) => p.key.startsWith(pickPrefix)).map((p) => p.key.slice(pickPrefix.length))),
@@ -109,10 +109,16 @@ export default function AssistantPanel() {
   };
 
   const addToPlan = (key: string, label: string, costInr: number, proposal: Proposal) => {
+    const wasSimulating = useEditor.getState().activeRun !== null;
     const change = applyAiProposal(proposal);
     if (!change) return;
     setPlan((cur) => [...cur.filter((p) => p.key !== key), { key, label, costInr, change }]);
-    focusOn({ points: change.points, label, tone: "added", insetRight: insetRight() });
+    const inset = insetRight();
+    // applying leaves the simulation view: let its 3D overlays (bubbles, markers) unmount first,
+    // mounting the focus label in the same commit trips a React portal removeChild error
+    const fly = () => focusOn({ points: change.points, label, tone: "added", insetRight: inset });
+    if (wasSimulating) setTimeout(fly, 120);
+    else fly();
   };
 
   const removeFromPlan = (key: string) => {
@@ -161,7 +167,9 @@ export default function AssistantPanel() {
   };
 
   const resultApplied = !!resultKey && livePlan.some((p) => p.key === resultKey);
-  const planCost = livePlan.reduce((s, p) => s + p.costInr, 0);
+  // the real diff vs today's setup — overlapping fixes (two re-routes of one guard) are not double-counted,
+  // and it matches the compare view and the report to the rupee
+  const planCost = baselineRun ? planCostInr(baselineRun, { world: project.world, scenario: project.scenario }) : livePlan.reduce((s, p) => s + p.costInr, 0);
   const rulesOnly = providerStatus === "none" || providerStatus === "rules";
 
   return (
@@ -294,7 +302,7 @@ export default function AssistantPanel() {
 
               <div className="mt-2.5 text-[10px] font-semibold uppercase tracking-wider text-[#8a8272]">What changes ({result.proposal.ops.length})</div>
               <ol className="mt-1 space-y-0.5 text-[11px] text-[#1d2430]">
-                {describeOps(result.proposal).map((line, i) => (
+                {describeOps(result.proposal, project.world).map((line, i) => (
                   <li key={i} className="rounded bg-[#faf8f4] px-2 py-1">
                     {line}
                   </li>

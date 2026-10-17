@@ -65,7 +65,7 @@ const COMPOUND_SOURCE: Record<CompoundInfo["source"], string> = {
 };
 
 type StepState = "pending" | "active" | "done" | "skipped" | "failed";
-const STEPS = ["Fetching map data", "Capturing satellite + street map", "Gemini analysing layout", "Building 3D twin"] as const;
+const STEPS = ["Fetching map data", "Capturing satellite + street map", "AI reading the satellite photo", "Building 3D twin"] as const;
 const MIN_AREA_M2 = 3000;
 
 interface BuildResult {
@@ -193,7 +193,7 @@ export default function ImportDialog() {
       if (c && c.ring.length >= 3) {
         setSelection({ kind: "polygon", ring: c.ring });
         setFocus({ lat: r.lat, lng: r.lon, bbox: ringBbox(c.ring), ring: c.ring, seq: Date.now() });
-        setBoundary({ ok: true, text: `Society boundary ${COMPOUND_SOURCE[c.source]}${c.name ? ` (“${c.name}”)` : ""} · ${c.areaHa} ha — drag the points if it's off.` });
+        setBoundary({ ok: true, text: `Society boundary ${COMPOUND_SOURCE[c.source]}${c.name ? ` (“${c.name}”)` : ""} — check it hugs your compound wall, and drag the points if it's off.` });
       } else {
         setBoundary({ ok: false, text: "Couldn't find the society's boundary automatically — fit the rectangle (or draw a polygon) around it." });
       }
@@ -234,7 +234,7 @@ export default function ImportDialog() {
         set(
           0,
           "done",
-          `${d.stats.buildings} buildings${d.stats.extraBuildings ? ` (${d.stats.extraBuildings} machine-traced)` : ""} · ${d.stats.roads} roads · ${d.stats.facilities} facilities`
+          `${d.stats.buildings} buildings${d.stats.extraBuildings ? ` (${d.stats.extraBuildings} machine-traced)` : ""} · ${d.stats.roads} roads mapped in the captured area`
         );
         return d as { world: World; notes: string[]; attribution: string };
       })
@@ -293,7 +293,7 @@ export default function ImportDialog() {
         set(
           2,
           "done",
-          `+${v.added.buildings} buildings${v.added.rejected ? ` (${v.added.rejected} implausible/duplicate dropped)` : ""} · ${v.added.gates} gates · ${v.added.walls ? "boundary wall" : "no wall"} · ${v.added.areas} zones (${v.model}${v.usedStreetMap ? ", satellite + street map" : ""})`
+          `+${v.added.buildings} buildings${v.added.heights ? ` · ${v.added.heights} heights estimated` : ""} · ${v.added.gates} gates · ${v.added.walls ? "boundary wall" : "no wall"} · ${v.added.areas} zones${v.added.rejected ? ` · ${v.added.rejected} unreliable guesses dropped` : ""}`
         );
         notes.push("Walls, gates, dark zones and extra buildings were inferred by Gemini from satellite imagery — verify them on the ground.");
       } catch (err) {
@@ -403,9 +403,9 @@ export default function ImportDialog() {
         <DialogHeader>
           <DialogTitle className="text-[#1d2430]">Pick your society on the map</DialogTitle>
           <DialogDescription className="text-xs text-[#5c6470]">
-            Search for your society — we outline its compound automatically (adjust the points if needed, or draw your own).
-            Buildings come from OpenStreetMap plus machine-traced footprints (Overture Maps); Gemini reads the satellite photo
-            and a street map to add compound walls, gates, any still-missing buildings and likely dark zones.
+            <span className="font-medium text-[#1d2430]">1</span> Search your society · <span className="font-medium text-[#1d2430]">2</span> check the
+            yellow outline we draw around it · <span className="font-medium text-[#1d2430]">3</span> build. AI reads the satellite photo and map
+            data to draft your buildings, walls, gates and today&apos;s guards, cameras and lights — you can correct anything afterwards.
           </DialogDescription>
         </DialogHeader>
 
@@ -418,19 +418,24 @@ export default function ImportDialog() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && query.trim()) search();
                 }}
-                placeholder="e.g. Prestige Shantiniketan, Bengaluru"
+                placeholder="Society name and city, e.g. Prestige Shantiniketan, Bengaluru"
+                autoFocus
                 className="flex-1 rounded-md border border-[#dcd6c8] bg-white px-3 py-2 text-xs focus:border-[#2e7d5b] focus:outline-none"
               />
               <Button size="sm" className="h-8 bg-[#1d2430] text-xs text-white hover:bg-[#2c3642]" onClick={search} disabled={searching || !query.trim()}>
                 {searching ? "Searching…" : "Search"}
               </Button>
               {results.length > 0 && (
-                <div className="absolute left-0 right-20 top-9 z-[1000] max-h-56 overflow-y-auto rounded-md border border-[#dcd6c8] bg-white shadow-lg">
-                  {results.map((r, i) => (
-                    <button key={i} onClick={() => pick(r)} className="block w-full border-b border-[#f0ece4] px-3 py-1.5 text-left text-[11px] text-[#1d2430] hover:bg-[#eef4f0]">
-                      {r.displayName}
-                    </button>
-                  ))}
+                <div className="absolute left-0 right-20 top-9 z-[1200] max-h-64 overflow-y-auto rounded-md border border-[#dcd6c8] bg-white shadow-lg">
+                  {results.map((r, i) => {
+                    const [name, ...rest] = r.displayName.split(",");
+                    return (
+                      <button key={i} onClick={() => pick(r)} className="block w-full border-b border-[#f0ece4] px-3 py-2 text-left hover:bg-[#eef4f0]">
+                        <span className="block text-xs font-semibold text-[#1d2430]">{name.trim()}</span>
+                        {rest.length > 0 && <span className="block truncate text-[10.5px] text-[#8a8272]">{rest.join(",").trim()}</span>}
+                      </button>
+                    );
+                  })}
                   <div className="px-3 py-1 text-right text-[9px] text-[#8a8272]">
                     {results.some((r) => r.source === "google") ? "Search: Google Places · © OpenStreetMap contributors" : "Search © OpenStreetMap contributors (Nominatim)"}
                   </div>
@@ -479,7 +484,7 @@ export default function ImportDialog() {
                   {sampleLoading ? "Loading sample…" : "Try a sample society"}
                 </Button>
                 <Button size="sm" className="h-8 bg-[#2e7d5b] text-xs text-white hover:bg-[#276c4f]" disabled={!spanOk || locating} onClick={build}>
-                  {locating ? "Finding boundary…" : "Build 3D twin with Gemini"}
+                  {locating ? "Finding boundary…" : "Build my 3D twin →"}
                 </Button>
               </div>
             </div>
@@ -528,13 +533,42 @@ export default function ImportDialog() {
 
               {fatal && <div className="rounded-md border border-[#e6c1c1] bg-[#fdf1f1] px-3 py-2 text-xs text-[#a33]">{fatal}</div>}
 
-              {result && (
-                <ul className="list-disc space-y-0.5 pl-4 text-[10px] leading-snug text-[#8a8272]">
-                  {result.notes.map((n, i) => (
-                    <li key={i}>{n}</li>
-                  ))}
-                </ul>
-              )}
+              {result && (() => {
+                const w = result.world;
+                const inferredB = w.buildings.filter((b) => b.inferred).length;
+                const stat = (n: number, label: string) => (
+                  <div className="rounded-md bg-[#f7f5f1] px-2 py-1.5 text-center">
+                    <div className="text-sm font-bold text-[#1d2430]">{n}</div>
+                    <div className="text-[10px] text-[#8a8272]">{label}</div>
+                  </div>
+                );
+                return (
+                  <div className="rounded-md border border-[#e9e4d8] bg-white px-3 py-2.5">
+                    <div className="text-xs font-semibold text-[#1d2430]">Your twin is ready</div>
+                    <div className="mt-2 grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+                      {stat(w.buildings.length, "buildings")}
+                      {stat(w.site?.gates.length ?? 0, "gates")}
+                      {stat(w.guards.length, "guards")}
+                      {stat(w.cameras.length, "cameras")}
+                      {stat(w.streetlights.length, "streetlights")}
+                      {stat(w.roads.filter((r) => !r.inferred).length, "roads & paths")}
+                    </div>
+                    <p className="mt-2 text-[11px] leading-snug text-[#5c6470]">
+                      <span className="font-medium text-[#7a5d1e]">Check before you rely on it:</span> today&apos;s guards, cameras and lights are a
+                      first draft{inferredB ? `, and ${inferredB} building${inferredB === 1 ? "" : "s"} have estimated shape or height` : ""}
+                      {w.site?.walls.length ? "; walls and gates were read from the satellite photo" : ""}. Click anything in the 3D view to correct it.
+                    </p>
+                    <details className="mt-1.5">
+                      <summary className="cursor-pointer text-[10px] text-[#8a8272] hover:text-[#5c6470]">How this was built ({result.notes.length} notes)</summary>
+                      <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[10px] leading-snug text-[#8a8272]">
+                        {result.notes.map((n, i) => (
+                          <li key={i}>{n}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  </div>
+                );
+              })()}
 
               <div className="flex gap-2 pt-1">
                 {result && (

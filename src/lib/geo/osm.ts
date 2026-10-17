@@ -227,7 +227,7 @@ export function parseOsmXml(xml: string): OverpassEl[] {
     if (!id) continue;
     const tags = tagsOf(m[2]);
     const isHighway = !!tags.highway && HIGHWAY_RE.test(tags.highway);
-    const isBuilding = !!tags.building;
+    const isBuilding = !!tags.building || !!tags["building:part"];
     const isLeisure = !!tags.leisure && LEISURE_RE.test(tags.leisure);
     if (!isHighway && !isBuilding && !isLeisure) continue;
     const geometry: Array<{ lat: number; lon: number }> = [];
@@ -370,6 +370,7 @@ export async function fetchOsmFeatures(s: number, n: number, w: number, e: numbe
 (
   way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service|living_street|pedestrian|footway|path|cycleway|track|steps)$"](${bbox});
   way["building"](${bbox});
+  way["building:part"](${bbox});
   way["leisure"~"^(park|garden|playground)$"](${bbox});
   node["highway"="bus_stop"](${bbox});
   node["amenity"~"^(community_centre|clinic|marketplace|place_of_worship|school|atm)$"](${bbox});
@@ -423,6 +424,7 @@ out body geom;`;
     fetchedAt: new Date().toISOString(),
   };
 
+  const parts: OsmFeatureBundle["buildings"] = [];
   for (const el of els) {
     const tags = el.tags ?? {};
     if (el.type === "way" && el.geometry && el.geometry.length >= 2) {
@@ -435,6 +437,16 @@ out body geom;`;
           points: pts,
           width: roadWidth(tags.highway, tags.lanes),
           path: ["footway", "path", "pedestrian", "steps", "cycleway", "track"].includes(tags.highway),
+        });
+      } else if (tags["building:part"] && !tags.building) {
+        // towers of a high-rise complex are often mapped as parts inside one podium outline
+        if (/^(roof|canopy|no)$/.test(tags["building:part"]) || parts.length >= MAX_BUILDINGS) continue;
+        parts.push({
+          id: `osm_part_${el.id}`,
+          name: tags.name,
+          polygon: pts,
+          height: tags.height ? parseFloat(tags.height) || undefined : undefined,
+          levels: tags["building:levels"] ? parseFloat(tags["building:levels"]) || undefined : undefined,
         });
       } else if (tags.building) {
         if (bundle.buildings.length >= MAX_BUILDINGS) continue;
@@ -467,9 +479,41 @@ out body geom;`;
       }
     }
   }
+  bundle.buildings = mergeBuildingParts(bundle.buildings, parts);
   bundleCache.set(key, { at: Date.now(), bundle });
   if (bundleCache.size > 20) bundleCache.delete(bundleCache.keys().next().value as string);
   return bundle;
+}
+
+function ringContains(ring: [number, number][], p: [number, number]) {
+  let ins = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [ya, xa] = ring[i];
+    const [yb, xb] = ring[j];
+    if (ya > p[0] !== yb > p[0] && p[1] < ((xb - xa) * (p[0] - ya)) / (yb - ya) + xa) ins = !ins;
+  }
+  return ins;
+}
+
+/**
+ * High-rise complexes are often mapped as one low podium outline (`building=*`,
+ * 1-2 levels) with the towers as `building:part`s inside it. Rendering only the
+ * outline flattens every tower, so an outline that holds ≥ 1 part is replaced by
+ * its parts (which carry the real levels/heights, and inherit the name). Pure.
+ */
+export function mergeBuildingParts(buildings: OsmFeatureBundle["buildings"], parts: OsmFeatureBundle["buildings"]): OsmFeatureBundle["buildings"] {
+  if (!parts.length) return buildings;
+  const centroid = (r: [number, number][]): [number, number] => [r.reduce((a, p) => a + p[0], 0) / r.length, r.reduce((a, p) => a + p[1], 0) / r.length];
+  const replaced = new Set<string>();
+  const out: OsmFeatureBundle["buildings"] = [];
+  for (const p of parts) {
+    const c = centroid(p.polygon);
+    const parent = buildings.find((b) => ringContains(b.polygon, c));
+    if (parent) replaced.add(parent.id);
+    // don't inherit the podium's levels: an unknown tower height falls through to the vision estimate
+    out.push({ ...p, name: p.name ?? parent?.name });
+  }
+  return [...buildings.filter((b) => !replaced.has(b.id)), ...out];
 }
 
 function roadWidth(highway: string, lanes?: string): number {

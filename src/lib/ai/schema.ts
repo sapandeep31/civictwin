@@ -272,30 +272,73 @@ export function applyProposal(draft: PraesidiumProject, proposal: Proposal): voi
   }
 }
 
-export function describeOps(proposal: Proposal): string[] {
+/**
+ * "near Main gate (Dr Rajkumar Rd)" / "near Tower B" / "on the north-east side" — places a
+ * position for people, instead of local coordinates.
+ */
+export function describePlace(x: number, z: number, world?: PraesidiumProject["world"]): string {
+  if (world) {
+    const marks: { name: string; x: number; z: number }[] = [
+      ...(world.site?.gates ?? []).map((g) => ({ name: g.name ?? "the gate", x: g.x, z: g.z })),
+      ...world.facilities.filter((f) => f.name && f.type !== "park").map((f) => ({ name: f.name!, x: f.x, z: f.z })),
+      ...world.buildings.filter((b) => b.name).map((b) => ({ name: b.name!, x: b.x, z: b.z })),
+      ...world.facilities.filter((f) => f.name && f.type === "park" && f.name !== "Park").map((f) => ({ name: f.name!, x: f.x, z: f.z })),
+    ];
+    let best: { name: string; d: number } | null = null;
+    for (const m of marks) {
+      const d = Math.hypot(m.x - x, m.z - z);
+      if (d < 45 && (!best || d < best.d)) best = { name: m.name, d };
+    }
+    if (best) return `near ${best.name}`;
+    const W = world.bounds.width;
+    const D = world.bounds.depth;
+    const ns = z < -D * 0.15 ? "north" : z > D * 0.15 ? "south" : "";
+    const ew = x < -W * 0.15 ? "west" : x > W * 0.15 ? "east" : "";
+    if (ns || ew) return `on the ${ns && ew ? `${ns}-${ew}` : ns || ew} side`;
+    return "in the centre";
+  }
+  return `at (${x.toFixed(0)}, ${z.toFixed(0)})`;
+}
+
+/** Human-readable list of a proposal's operations (pass the world to name places and objects). */
+export function describeOps(proposal: Proposal, world?: PraesidiumProject["world"]): string[] {
   const out: string[] = [];
+  const at = (x: number, z: number) => describePlace(x, z, world);
+  const light = (id: string) => world?.streetlights.find((l) => l.id === id);
+  const cam = (id: string) => world?.cameras.find((c) => c.id === id);
+  const guardName = (id: string) => world?.guards.find((g) => g.id === id)?.name ?? (world ? "a guard" : id);
   proposal.ops.forEach((op, i) => {
     switch (op.op) {
       case "add_streetlight":
-        out.push(`${i + 1}. Add streetlight at (${op.x.toFixed(0)}, ${op.z.toFixed(0)})`);
+        out.push(`${i + 1}. Add a streetlight ${at(op.x, op.z)}`);
         break;
-      case "move_streetlight":
-        out.push(`${i + 1}. Move streetlight ${op.id} to (${op.x.toFixed(0)}, ${op.z.toFixed(0)})`);
+      case "move_streetlight": {
+        const l = light(op.id);
+        out.push(`${i + 1}. Move the streetlight ${l ? at(l.x, l.z) : world ? "" : op.id} to ${at(op.x, op.z).replace(/^near |^on |^in /, "")}`.replace(/\s+/g, " "));
         break;
-      case "edit_streetlight":
-        out.push(`${i + 1}. Edit streetlight ${op.id} — ${JSON.stringify({ ...op, op: undefined })}`);
+      }
+      case "edit_streetlight": {
+        const l = light(op.id);
+        const what = op.on === true ? "Switch on" : op.on === false ? "Switch off" : "Brighten / adjust";
+        out.push(`${i + 1}. ${what} the streetlight ${l ? at(l.x, l.z) : world ? "" : op.id}`.trim());
         break;
+      }
       case "add_camera":
-        out.push(`${i + 1}. Add CCTV camera at (${op.x.toFixed(0)}, ${op.z.toFixed(0)})`);
+        out.push(`${i + 1}. Add a CCTV camera ${at(op.x, op.z)}`);
         break;
-      case "move_camera":
-        out.push(`${i + 1}. Move camera ${op.id} to (${op.x.toFixed(0)}, ${op.z.toFixed(0)})`);
+      case "move_camera": {
+        const c = cam(op.id);
+        out.push(`${i + 1}. Move the camera ${c ? at(c.x, c.z) : world ? "" : op.id} to ${at(op.x, op.z).replace(/^near |^on |^in /, "")}`.replace(/\s+/g, " "));
         break;
-      case "edit_camera":
-        out.push(`${i + 1}. Edit camera ${op.id} — ${JSON.stringify({ ...op, op: undefined })}`);
+      }
+      case "edit_camera": {
+        const c = cam(op.id);
+        const what = op.active === true ? "Repair / switch on" : op.active === false ? "Switch off" : "Re-aim / widen";
+        out.push(`${i + 1}. ${what} the camera ${c ? at(c.x, c.z) : world ? "" : op.id}`.trim());
         break;
+      }
       case "set_patrol":
-        out.push(`${i + 1}. Update patrol route for ${op.guardId} (${op.waypoints.length} waypoints)`);
+        out.push(`${i + 1}. New patrol route for ${guardName(op.guardId)} (${op.waypoints.length} stops)`);
         break;
       case "set_scenario":
         out.push(

@@ -9,11 +9,42 @@ import type { StoredRun, World } from "@/lib/world/types";
 import { COST_ASSUMPTIONS } from "@/lib/world/types";
 import type { MetricDiff } from "@/lib/sim/metrics";
 import { eventTypeLabel, outcomeLabel } from "@/lib/sim/labels";
-import { RISK_EXPLAINER } from "@/lib/sim/compare";
+import { planCostInr, riskIndex, RISK_EXPLAINER } from "@/lib/sim/compare";
 
-/** jsPDF's built-in fonts are Latin-1 only: swap arrows / rupee / dashes. */
+/**
+ * jsPDF's built-in fonts are Latin-1 only. Anything outside it (−, →, ≈, …, ✓, curly quotes)
+ * is drawn as garbage AND makes jsPDF letter-space the whole line — so map the common ones
+ * and drop the rest. Applied to every doc.text / splitTextToSize call below.
+ */
 function pdfSafe(s: string): string {
-  return s.replace(/→/g, "->").replace(/₹/g, "INR ").replace(/[–—]/g, "-").replace(/·/g, "|");
+  return s
+    .replace(/→/g, "->")
+    .replace(/←/g, "<-")
+    .replace(/₹\s?/g, "INR ")
+    .replace(/[–—]/g, "-")
+    .replace(/[−‒]/g, "-")
+    .replace(/≈/g, "~")
+    .replace(/≤/g, "<=")
+    .replace(/≥/g, ">=")
+    .replace(/…/g, "...")
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[✓✔]/g, "OK")
+    .replace(/[✕✗×]/g, "x")
+    .replace(/Σ/g, "All")
+    .replace(/•/g, "-")
+    .replace(/[^\x00-\xFF]/g, "");
+}
+
+/** Route all text through pdfSafe (strings and string arrays). */
+function safeDoc(doc: jsPDF): jsPDF {
+  const text = doc.text.bind(doc);
+  const split = doc.splitTextToSize.bind(doc);
+  const clean = (t: unknown) => (typeof t === "string" ? pdfSafe(t) : Array.isArray(t) ? t.map((x) => (typeof x === "string" ? pdfSafe(x) : x)) : t);
+  (doc as unknown as { text: (...a: unknown[]) => jsPDF }).text = (t: unknown, ...rest: unknown[]) => (text as (...a: unknown[]) => jsPDF)(clean(t), ...rest);
+  (doc as unknown as { splitTextToSize: (...a: unknown[]) => string[] }).splitTextToSize = (t: unknown, ...rest: unknown[]) =>
+    (split as (...a: unknown[]) => string[])(clean(t), ...rest);
+  return doc;
 }
 
 const NAVY: [number, number, number] = [29, 36, 48];
@@ -28,7 +59,7 @@ const PAGE_H = 297;
 const CONTENT_W = PAGE_W - M * 2;
 
 export function generateReportPdf(data: ReportData, opts?: { download?: boolean }): jsPDF {
-  const doc = new jsPDF({ unit: "mm", format: "a4" });
+  const doc = safeDoc(new jsPDF({ unit: "mm", format: "a4" }));
   const { project, baseline, intervention, comparison } = data;
   let y = 0;
   let page = 1;
@@ -165,6 +196,46 @@ export function generateReportPdf(data: ReportData, opts?: { download?: boolean 
   doc.text(disc, M + 3, y + 6);
   y += 24;
 
+  /* ---------------- page-1 summary: the answer a committee reads first ---------------- */
+  {
+    const b = baseline.metrics;
+    const lines: string[] = [];
+    const inc = b.dramaIncidents ?? b.eventsTotal;
+    lines.push(`Today's setup: ${inc} simulated incident(s), ${b.perpsCaughtPct ?? b.resolutionRatePct}% of offenders caught (risk index ${riskIndex(baseline.events)}).`);
+    if (intervention) {
+      const after = riskIndex(intervention.events);
+      const before = riskIndex(baseline.events);
+      const cost = planCostInr(baseline, intervention);
+      lines.push(
+        `With the proposed plan (est. INR ${cost.toLocaleString("en-IN")}): risk ${before} -> ${after}` +
+          (after < before ? " — a safer simulated night." : after > before ? " — a RISKIER simulated night; revise the plan." : " — no clear change on this night.")
+      );
+      const ab = data.ablation;
+      if (ab) {
+        const best = ab.rows.filter((r) => r.riskReduced > 0).sort((p, q) => (q.riskPerLakh ?? 1e6) - (p.riskPerLakh ?? 1e6))[0];
+        if (best) lines.push(`Best value: ${best.label} (${best.costInr ? `INR ${best.costInr.toLocaleString("en-IN")}` : "free"}).`);
+        const worse = ab.rows.filter((r) => r.costInr > 0 && r.riskReduced < 0);
+        if (worse.length) lines.push(`Drop first: ${worse.map((w) => w.label).join("; ")} — made the night worse on its own.`);
+      }
+    } else {
+      lines.push("No plan tested yet — add fixes in the AI planner and re-run the night to compare.");
+    }
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10.5);
+    const wrapped = lines.flatMap((l) => doc.splitTextToSize(`•  ${l}`, CONTENT_W - 8));
+    const h = 10 + wrapped.length * 4.6;
+    doc.setFillColor(238, 244, 240);
+    doc.setDrawColor(...GREEN);
+    doc.roundedRect(M, y, CONTENT_W, h, 2, 2, "FD");
+    doc.setTextColor(...GREEN);
+    doc.text("Summary for the committee (simulated)", M + 4, y + 6);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9.5);
+    doc.setTextColor(...NAVY);
+    doc.text(wrapped, M + 4, y + 11.5);
+    y += h + 6;
+  }
+
   /* ---------------- provenance ---------------- */
   title("Data provenance & run identity");
   const prov: [string, string][] = [
@@ -191,7 +262,7 @@ export function generateReportPdf(data: ReportData, opts?: { download?: boolean 
 
   if (project.source.kind === "osm") {
     para(
-      "Note: imported geometry is simplified (building footprints as bounding rectangles; heights may be inferred). Inferred attributes are marked in the editor and are not authoritative facts.",
+      "Note: imported geometry is simplified (building footprints as fitted rectangles; heights may be estimated). Inferred attributes are marked in the editor and are not authoritative facts.",
       8.5
     );
   }
@@ -249,13 +320,13 @@ export function generateReportPdf(data: ReportData, opts?: { download?: boolean 
     ]);
     simpleTable(rows, [78, 32, 32, 38], ["Metric", "Baseline", "Intervention", "Change"]);
 
-    if (intervention.metrics.interventionCostInr !== null) {
+    {
       ensure(20);
       doc.setFont("helvetica", "bold");
       doc.setFontSize(10.5);
       doc.setTextColor(...NAVY);
       doc.text(
-        `Estimated intervention cost: INR ${intervention.metrics.interventionCostInr.toLocaleString("en-IN")}`,
+        `Estimated cost of the plan: INR ${planCostInr(baseline, intervention).toLocaleString("en-IN")}`,
         M,
         y
       );
@@ -337,9 +408,11 @@ export function generateReportPdf(data: ReportData, opts?: { download?: boolean 
       simpleTable(rows, [9, 55, 24, 17, 19, 18, 15, 17], ["#", "Change", "Est. cost", "Risk", "Per lakh", "Avoided", "Caught", "Faster"]);
 
       const best = ab.rows.find((r) => r.riskReduced > 0);
-      const dud = ab.rows.filter((r) => r.riskReduced <= 0 && r.costInr > 0);
+      const worse = ab.rows.filter((r) => r.riskReduced < 0 && r.costInr > 0);
+      const dud = ab.rows.filter((r) => r.riskReduced === 0 && r.costInr > 0);
       const bullets: string[] = [];
       if (best) bullets.push(`Best value: "${best.label}" — ${best.riskPerLakh !== null ? `${best.riskPerLakh.toFixed(1)} risk points removed per INR 1 lakh` : "no purchase cost"}.`);
+      if (worse.length) bullets.push(`Drop first — made this night worse on its own: ${worse.map((d) => d.label).join("; ")}.`);
       if (dud.length) bullets.push(`${dud.length} paid change(s) showed no measurable benefit on this night: ${dud.map((d) => d.label).join("; ")}. Consider deferring or re-siting them.`);
       bullets.push("Changes interact: single-change effects need not add up to the combined result.");
       bullets.push("One simulated night is one sample. Re-test on the High-Risk and Low-Visibility nights before committing funds.");

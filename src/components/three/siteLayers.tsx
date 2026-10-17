@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
 import { useThree } from "@react-three/fiber";
 import { useEditor } from "@/lib/store/editor";
-import type { SiteArea, SiteGate, SiteWall } from "@/lib/world/types";
+import type { SiteArea, SiteGate, SiteWall, World } from "@/lib/world/types";
 
 const GATE_COLORS: Record<SiteGate["kind"], string> = { main: "#e8a33d", service: "#7aa6d8", pedestrian: "#8fd19e" };
 
@@ -238,24 +238,49 @@ export function fitZoom(cam: THREE.Camera): number {
     const byH = (o.top - o.bottom) / (ext * 0.95);
     return Math.max(1.5, Math.min(DEFAULT_ZOOM, byW, byH));
   }
-  const { width, depth } = p.world.bounds;
-  const span = (width + depth) * 0.72; // footprint diagonal as seen from the iso/top views
+  const e = contentExtent(p.world);
+  const span = (e.width + e.depth) * 0.72; // footprint diagonal as seen from the iso/top views
   const z = Math.min((o.right - o.left) / span, (o.top - o.bottom) / (span * 0.62)) * 0.92;
-  return Math.max(0.6, Math.min(2.2, z));
+  return Math.max(0.6, Math.min(DEFAULT_ZOOM, z));
+}
+
+/**
+ * Extent of what was actually built: the compound wall when there is one, else
+ * the buildings. The captured bounds are the selection's north-up box, which for
+ * a tilted or irregular society is mostly empty — framing it leaves the twin tiny
+ * and off-centre.
+ */
+export function contentExtent(w: World): { cx: number; cz: number; width: number; depth: number } {
+  const wall = w.site?.walls.find((x) => x.closed && x.points.length >= 3);
+  const pts = wall ? wall.points : w.buildings.flatMap((b) => [{ x: b.x - b.width / 2, z: b.z - b.depth / 2 }, { x: b.x + b.width / 2, z: b.z + b.depth / 2 }]);
+  if (pts.length < 2) return { cx: 0, cz: 0, width: w.bounds.width, depth: w.bounds.depth };
+  const xs = pts.map((q) => q.x);
+  const zs = pts.map((q) => q.z);
+  const [x0, x1, z0, z1] = [Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)];
+  return { cx: (x0 + x1) / 2, cz: (z0 + z1) / 2, width: Math.max(60, x1 - x0), depth: Math.max(60, z1 - z0) };
 }
 
 function FitGeoCamera() {
   const projectId = useEditor((s) => s.project?.projectId);
   const camera = useThree((s) => s.camera);
+  const controls = useThree((s) => s.controls) as unknown as { target: THREE.Vector3; update: () => void } | null;
   const size = useThree((s) => s.size);
   useEffect(() => {
     const pr = useEditor.getState().project;
     if (!pr?.source.geo && !pr?.world.site?.walls.some((w) => w.closed)) return;
     const o = camera as THREE.OrthographicCamera;
+    if (pr.source.geo && controls) {
+      // re-centre on the society, keeping the current viewing angle
+      const e = contentExtent(pr.world);
+      const off = o.position.clone().sub(controls.target);
+      controls.target.set(e.cx, 0, e.cz);
+      o.position.copy(controls.target).add(off);
+      controls.update();
+    }
     o.zoom = fitZoom(o);
     o.updateProjectionMatrix();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, camera, size.width > 0]);
+  }, [projectId, camera, controls, size.width > 0]);
   return null;
 }
 

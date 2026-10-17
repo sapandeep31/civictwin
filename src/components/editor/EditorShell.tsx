@@ -17,6 +17,7 @@ import dynamic from "next/dynamic";
 const ResultsDialog = dynamic(() => import("./ResultsDialog").then((m) => m.ResultsDialog), { ssr: false });
 const CompareDialog = dynamic(() => import("./ResultsDialog").then((m) => m.CompareDialog), { ssr: false });
 import AssistantPanel from "./AssistantPanel";
+import NightSummary from "./NightSummary";
 import ImportDialog from "./ImportDialog";
 import LocalIntelPanel from "./LocalIntelPanel";
 import { useEditor } from "@/lib/store/editor";
@@ -160,6 +161,7 @@ export default function EditorShell() {
           >
             {showInspector ? "▸" : "◂"}
           </button>
+          <NightSummary />
         </main>
 
         {showInspector && <Inspector />}

@@ -9,7 +9,7 @@
  * Everything added is marked inferred. Deterministic for a given world.
  */
 
-import type { Building, CctvCamera, Guard, Road, Streetlight, Vec2, World } from "../world/types";
+import type { Building, CctvCamera, Guard, Road, SiteGate, Streetlight, Vec2, World } from "../world/types";
 import { buildNavGraph, entranceOf, type NavGraph } from "../world/graph";
 import { makeRng } from "../sim/rng";
 
@@ -229,10 +229,61 @@ export function seedBaseline(world: World, seed = 1): World {
   return { ...world, streetlights, cameras, guards };
 }
 
+/**
+ * Gates where mapped roads cross the compound wall — used when the vision model
+ * returned none (it varies run to run), so every walled twin has entrances and
+ * gate cameras/guards. Widest road = main gate; crossings < 25 m apart merge.
+ */
+export function inferGates(world: World, max = 3): SiteGate[] {
+  const wall = world.site?.walls.find((w) => w.closed && w.points.length >= 3);
+  if (!wall) return [];
+  const ring = wall.points;
+  const hits: { x: number; z: number; width: number; name?: string }[] = [];
+  for (const r of world.roads) {
+    if (r.inferred || r.category === "path") continue;
+    for (let i = 1; i < r.points.length; i++) {
+      const a = r.points[i - 1];
+      const b = r.points[i];
+      for (let k = 0; k < ring.length; k++) {
+        const c = ring[k];
+        const d = ring[(k + 1) % ring.length];
+        const den = (b.x - a.x) * (d.z - c.z) - (b.z - a.z) * (d.x - c.x);
+        if (Math.abs(den) < 1e-9) continue;
+        const t = ((c.x - a.x) * (d.z - c.z) - (c.z - a.z) * (d.x - c.x)) / den;
+        const u = ((c.x - a.x) * (b.z - a.z) - (c.z - a.z) * (b.x - a.x)) / den;
+        if (t >= 0 && t <= 1 && u >= 0 && u <= 1) hits.push({ x: a.x + t * (b.x - a.x), z: a.z + t * (b.z - a.z), width: r.width, name: r.name });
+      }
+    }
+  }
+  const picked: typeof hits = [];
+  for (const h of hits.sort((p, q) => q.width - p.width)) {
+    if (picked.length >= max) break;
+    if (picked.some((p) => d2(p, h) < 25 * 25)) continue;
+    picked.push(h);
+  }
+  return picked.map((p, i) => ({
+    id: `gt_inf_${i}`,
+    name: i === 0 ? `Main gate${p.name ? ` (${p.name})` : ""}` : `Gate ${i + 1}${p.name ? ` (${p.name})` : ""}`,
+    kind: i === 0 ? ("main" as const) : ("service" as const),
+    x: p.x,
+    z: p.z,
+    inferred: true,
+  }));
+}
+
 export function prepareImportedWorld(world: World, seed = 1): { world: World; notes: string[] } {
+  const gateNotes: string[] = [];
+  if (world.site && !world.site.gates.length) {
+    const gates = inferGates(world);
+    if (gates.length) {
+      world = { ...world, site: { ...world.site, gates } };
+      gateNotes.push(`${gates.length} gate${gates.length === 1 ? "" : "s"} placed where mapped roads cross the compound wall — move them to the real entrances if needed.`);
+    }
+  }
   const conn = connectNetwork(world);
   const seeded = seedBaseline(conn.world, seed);
   const notes = [
+    ...gateNotes,
     `Walkable network auto-connected (${conn.added} inferred connector paths, ${conn.components} component${conn.components === 1 ? "" : "s"}).`,
     `Inferred "current setup" baseline: ${seeded.guards.length} guards, ${seeded.cameras.length} gate cameras, ${seeded.streetlights.length} streetlights with deliberate gaps in back lanes and dark zones — edit to match reality.`,
   ];

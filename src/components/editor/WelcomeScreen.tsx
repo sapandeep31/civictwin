@@ -229,9 +229,23 @@ export default function WelcomeScreen() {
                   <ArrowRight strokeWidth={1.75} className="h-4 w-4" />
                 </button>
               </div>
-              <p style={{ "--d": "0.4s" } as React.CSSProperties} className="hero-fade mt-3 max-w-md text-pretty text-xs italic leading-relaxed text-slate-400/80">
-                * We suggest starting with the demo society (Launch live demo) &mdash; it&rsquo;s pre-loaded and runs instantly.
-              </p>
+              {recent[0] ? (
+                <button
+                  onClick={() => handleOpenProject(recent[0].projectId)}
+                  style={{ "--d": "0.4s" } as React.CSSProperties}
+                  className="hero-fade group mt-4 inline-flex max-w-md items-center gap-2 rounded-full bg-white/[0.06] px-4 py-2 text-left text-sm text-slate-200 ring-1 ring-white/10 transition hover:bg-white/10 hover:ring-teal-300/40"
+                >
+                  <Clock strokeWidth={1.75} className="h-4 w-4 shrink-0 text-teal-300" />
+                  <span className="truncate">
+                    Continue where you left off: <span className="font-semibold text-white">{recent[0].name}</span>
+                  </span>
+                  <ArrowRight strokeWidth={1.75} className="h-4 w-4 shrink-0 text-slate-400 transition group-hover:translate-x-0.5 group-hover:text-teal-300" />
+                </button>
+              ) : (
+                <p style={{ "--d": "0.4s" } as React.CSSProperties} className="hero-fade mt-3 max-w-md text-pretty text-xs italic leading-relaxed text-slate-400/80">
+                  * We suggest starting with the demo society (Launch live demo) &mdash; it&rsquo;s pre-loaded and runs instantly.
+                </p>
+              )}
             </div>
           </div>
           <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-b from-transparent to-[#060b18]" />

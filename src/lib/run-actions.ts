@@ -64,7 +64,10 @@ export async function runBaseline(): Promise<void> {
     runKind: "baseline",
     playing: true,
     displayT: 0,
-    resultsOpen: true,
+    // a 30-min night at 1× is 30 real minutes — start fast enough to see the first incident in seconds
+    speed: Math.max(st.speed, 4),
+    // let the night play: a non-blocking summary card (NightSummary) links to the full results
+    resultsOpen: false,
   }));
   playbackClock.t = 0;
   void useEditor.getState().save();
@@ -100,6 +103,32 @@ export async function runIntervention(): Promise<void> {
   }));
   playbackClock.t = 0;
   void useEditor.getState().save();
+}
+
+/** Cheap fingerprint of everything a fix can change (positions, counts, patrols, guards on duty). */
+function setupSignature(w: PraesidiumProject["world"], guardCount: number | null | undefined): string {
+  const r = (v: number) => Math.round(v * 10);
+  const sum = (xs: { x: number; z: number }[]) => xs.reduce((s, p) => s + r(p.x) * 7 + r(p.z) * 13, 0);
+  return [
+    w.streetlights.length,
+    sum(w.streetlights),
+    w.streetlights.filter((l) => l.on).length,
+    w.cameras.length,
+    sum(w.cameras),
+    w.cameras.filter((c) => c.active).length,
+    w.guards.length,
+    w.guards.reduce((s, g) => s + sum(g.waypoints) + g.waypoints.length, 0),
+    w.buildings.length,
+    w.roads.length,
+    guardCount ?? "d",
+  ].join("|");
+}
+
+/** True when the society or guards on duty changed since the stored baseline was run. */
+export function setupChangedSinceBaseline(p: PraesidiumProject): boolean {
+  const b = p.baselineRun;
+  if (!b) return false;
+  return setupSignature(p.world, p.scenario.guardCount) !== setupSignature(b.world, b.scenario.guardCount);
 }
 
 /** Restore playback frames for a stored run (deterministic replay). */
