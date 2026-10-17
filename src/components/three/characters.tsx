@@ -404,6 +404,7 @@ export function CharactersLayer() {
   useEffect(() => () => rig?.dispose(), [rig]);
 
   const zzzTex = useMemo(() => (typeof document !== "undefined" ? makeZzzTexture() : null), []);
+  useEffect(() => () => zzzTex?.dispose(), [zzzTex]);
   const zzzSprites = useMemo(() => {
     if (!zzzTex) return [];
     return Array.from({ length: nG }, () => {

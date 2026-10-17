@@ -395,10 +395,7 @@ function SceneContents() {
         infiniteGrid={false}
       />
       {/* bounds frame */}
-      <lineSegments position={[0, 0.02, 0]}>
-        <edgesGeometry args={[new THREE.PlaneGeometry(b.width, b.depth).toNonIndexed()]} />
-        <lineBasicMaterial color={theme.frameColor} />
-      </lineSegments>
+      <BoundsFrame width={b.width} depth={b.depth} color={theme.frameColor} />
 
       <SiteLayers />
       <RoadsLayer
@@ -458,6 +455,22 @@ function SceneContents() {
       <CanvasControlsBridge controlsRef={controlsRef} />
       <FocusFlyer />
     </>
+  );
+}
+
+/** Site bounds outline — geometry built once per size (an inline `new PlaneGeometry` leaked a buffer every render). */
+function BoundsFrame({ width, depth, color }: { width: number; depth: number; color: string }) {
+  const geo = useMemo(() => {
+    const plane = new THREE.PlaneGeometry(width, depth);
+    const edges = new THREE.EdgesGeometry(plane);
+    plane.dispose();
+    return edges;
+  }, [width, depth]);
+  useEffect(() => () => geo.dispose(), [geo]);
+  return (
+    <lineSegments position={[0, 0.02, 0]} geometry={geo}>
+      <lineBasicMaterial color={color} />
+    </lineSegments>
   );
 }
 

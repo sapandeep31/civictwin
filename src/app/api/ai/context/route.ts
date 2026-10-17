@@ -127,8 +127,10 @@ sourceIdx = 0-based index into the grounding sources list you used (omit/null if
         system: SYSTEM,
         googleSearch: true,
         temperature: 0.3,
-        maxOutputTokens: 4096,
-        timeoutMs: 80000,
+        // grounded search has its own small quota: fail fast (it 429s on every key) instead of ~60 s
+        maxOutputTokens: 8192,
+        timeoutMs: 22000,
+        budgetMs: 28000,
       });
     } catch (e) {
       // Search-grounding quota/outage: degrade to model knowledge, clearly labelled, and do not cache for long.
@@ -137,8 +139,10 @@ sourceIdx = 0-based index into the grounding sources list you used (omit/null if
         prompt: prompt + "\nNOTE: live search is unavailable; use only general well-known knowledge, state uncertainty, and set sourceIdx to null.",
         system: SYSTEM,
         temperature: 0.3,
-        maxOutputTokens: 4096,
-        timeoutMs: 40000,
+        maxOutputTokens: 8192,
+        thinkingLevel: "low",
+        timeoutMs: 25000,
+        budgetMs: 35000,
       });
       console.warn("[ai/context] grounded call failed:", e instanceof Error ? e.message.slice(0, 200) : e);
     }
@@ -153,8 +157,24 @@ sourceIdx = 0-based index into the grounding sources list you used (omit/null if
     CACHE.set(key, { at: Date.now() - (groundingNote ? TTL_MS - 2 * 60 * 1000 : 0), data });
     return NextResponse.json({ ok: true, data });
   } catch (err) {
+    // Never a 5xx: local intel is optional context. Return a clearly-labelled neutral briefing
+    // (even incident mix, national helplines only) and cache it briefly so it is retried soon.
     console.warn("[ai/context] failed:", err instanceof Error ? err.message.slice(0, 200) : err);
     const f = friendlyUpstreamError(err, "Gemini");
-    return NextResponse.json({ ok: false, error: `Local intel unavailable: ${f.message}`, rateLimited: f.rateLimited }, { status: f.status });
+    const data = normalize(
+      {
+        summary: `Local news research is unavailable right now (${f.rateLimited ? "AI quota reached" : "AI service error"}), so the simulation uses neutral defaults for ${placeName}. Retry later for a grounded local briefing.`,
+        helplines: [
+          { name: "Emergency (police)", number: "112" },
+          { name: "Women helpline", number: "1091" },
+        ],
+      },
+      [],
+      placeName,
+      "none",
+      false
+    );
+    CACHE.set(key, { at: Date.now() - TTL_MS + 2 * 60 * 1000, data });
+    return NextResponse.json({ ok: true, data: { ...data, unavailable: true } });
   }
 }

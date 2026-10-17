@@ -313,14 +313,24 @@ export function RoadsLayer({
   theme?: "night" | "sunset" | "daylight";
 }) {
   const select = useEditor((s) => s.select);
-  const geometries = useMemo(
-    () =>
-      roads.map((r) => ({
-        road: r,
-        ...createRoadGeometries(r.points, r.width, r.category === "path"),
-      })),
-    [roads]
+  // Every edit deep-clones the world, so `roads` is a new array on every slider tick. Rebuild the
+  // GPU geometry only when the road SHAPES change, and free the old buffers when they do.
+  const shapeSig = useMemo(() => roads.map((r) => `${r.width}|${r.category}|${r.points.map((p) => `${p.x},${p.z}`).join(";")}`).join("#"), [roads]);
+  const geos = useMemo(
+    () => roads.map((r) => createRoadGeometries(r.points, r.width, r.category === "path")),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shapeSig]
   );
+  useEffect(
+    () => () =>
+      geos.forEach((g) => {
+        g.roadGeo?.dispose();
+        g.curbGeo?.dispose();
+        g.lineGeo?.dispose();
+      }),
+    [geos]
+  );
+  const geometries = roads.map((road, i) => ({ road, ...(geos[i] ?? { roadGeo: null, curbGeo: null, lineGeo: null }) }));
 
   return (
     <group>

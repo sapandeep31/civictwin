@@ -1116,8 +1116,19 @@ export function BuildingsLayer({
   const select = useEditor((s) => s.select);
   const facilities = useEditor((s) => s.project?.world.facilities) ?? EMPTY_FACILITIES;
 
-  const kinds = useMemo(() => classifyAll(buildings, facilities), [buildings, facilities]);
-  const { body, glow } = useMemo(() => buildAll(buildings, kinds, theme), [buildings, kinds, theme]);
+  // Every edit deep-clones the world: rebuild the merged city mesh only when something that
+  // affects its look changed (not e.g. on a streetlight slider tick).
+  const sig = useMemo(
+    () =>
+      buildings.map((b) => `${b.id}|${b.x}|${b.z}|${b.width}|${b.depth}|${b.rotation}|${b.height}|${b.category}|${b.name ?? ""}`).join("#") +
+      "~" +
+      facilities.map((f) => `${f.type}|${f.x}|${f.z}|${f.name ?? ""}`).join("#"),
+    [buildings, facilities]
+  );
+  /* eslint-disable react-hooks/exhaustive-deps */
+  const kinds = useMemo(() => classifyAll(buildings, facilities), [sig]);
+  const { body, glow } = useMemo(() => buildAll(buildings, kinds, theme), [kinds, theme]);
+  /* eslint-enable react-hooks/exhaustive-deps */
   useEffect(
     () => () => {
       body.dispose();
@@ -1145,10 +1156,17 @@ export function BuildingsLayer({
   }, [buildings, count]);
 
   const selected = buildings.find((b) => b.id === selectedId);
-  const selEdges = useMemo(
-    () => (selected ? new THREE.EdgesGeometry(new THREE.BoxGeometry(selected.width, selected.height, selected.depth)) : null),
-    [selected?.width, selected?.height, selected?.depth] // eslint-disable-line react-hooks/exhaustive-deps
-  );
+  const sw = selected?.width;
+  const sh = selected?.height;
+  const sd = selected?.depth;
+  const selEdges = useMemo(() => {
+    if (sw === undefined || sh === undefined || sd === undefined) return null;
+    const box = new THREE.BoxGeometry(sw, sh, sd);
+    const edges = new THREE.EdgesGeometry(box);
+    box.dispose(); // only needed to derive the edges
+    return edges;
+  }, [sw, sh, sd]);
+  useEffect(() => () => selEdges?.dispose(), [selEdges]);
 
   const nightish = theme !== "daylight";
   return (
