@@ -95,7 +95,12 @@ export async function placesSearch(q: string): Promise<GeoSearchResult[]> {
     body: JSON.stringify({ textQuery: q, regionCode: "IN", pageSize: 5 }),
     signal: AbortSignal.timeout(8000),
   });
-  if (!res.ok) throw new Error(`Places search returned HTTP ${res.status}`);
+  if (!res.ok) {
+    // surfaced in server logs: a key without "Places API (New)" enabled fails here silently otherwise
+    const detail = (await res.text().catch(() => "")).slice(0, 240);
+    console.warn(`[geo/search] Google Places HTTP ${res.status}: ${detail}`);
+    throw new Error(`Places search returned HTTP ${res.status}`);
+  }
   const data = (await res.json()) as {
     places?: Array<{
       displayName?: { text?: string };

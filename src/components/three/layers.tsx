@@ -111,7 +111,7 @@ function setControlsEnabled(v: boolean) {
  * pointer has travelled DRAG_THRESHOLD_PX. Orbit controls are held off for this
  * gesture so it never pans/rotates the camera while an object is grabbed.
  */
-function armPendingDrag(e: ThreeEvent<PointerEvent>, kind: "streetlight" | "camera" | "facility", id: string, offX: number, offZ: number) {
+export function armPendingDrag(e: ThreeEvent<PointerEvent>, kind: "streetlight" | "camera" | "facility" | "building", id: string, offX: number, offZ: number) {
   const sx = e.nativeEvent.clientX;
   const sy = e.nativeEvent.clientY;
   setControlsEnabled(false);

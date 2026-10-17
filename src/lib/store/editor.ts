@@ -70,7 +70,7 @@ export type EditMode = "navigate" | "edit";
 /** True while a simulation run is loaded: the society must not be edited. */
 export const isLocked = (s: { activeRun: unknown }) => s.activeRun !== null;
 
-export type DragKind = "streetlight" | "camera" | "facility" | "guard";
+export type DragKind = "streetlight" | "camera" | "facility" | "guard" | "building";
 
 export interface DragState {
   kind: DragKind;
@@ -135,7 +135,8 @@ interface EditorState {
   commitRoad: () => void;
   cancelRoad: () => void;
 
-  mutateWorld: (fn: (draft: PraesidiumProject) => void, opts?: { silent?: boolean }) => void;
+  /** `coalesce`: edits with the same key within ~1 s merge into one undo step (slider drags). */
+  mutateWorld: (fn: (draft: PraesidiumProject) => void, opts?: { silent?: boolean; coalesce?: string }) => void;
   addStreetlight: (x: number, z: number) => void;
   addCamera: (x: number, z: number) => void;
   addGuard: (x: number, z: number) => void;
@@ -167,6 +168,12 @@ interface EditorState {
   moveObject: (sel: NonNullable<Selection>, x: number, z: number) => void;
   deleteSelected: () => void;
 
+  /** Copy the selected light/camera/building/facility beside the original and select the copy. */
+  duplicateSelected: () => void;
+  /** Move the selected object by (dx, dz) metres. */
+  nudgeSelected: (dx: number, dz: number) => void;
+  /** Rotate the selected building / camera by `deg` (clockwise on the map). */
+  rotateSelected: (deg: number) => void;
   undo: () => void;
   redo: () => void;
   save: () => Promise<void>;
@@ -191,6 +198,7 @@ interface EditorState {
 }
 
 const HISTORY_LIMIT = 50;
+let lastCoalesce: { key: string; at: number } | null = null;
 
 export const useEditor = create<EditorState>((set, get) => ({
   screen: "welcome",
@@ -339,7 +347,9 @@ export const useEditor = create<EditorState>((set, get) => ({
           ? get().project?.world.cameras.find((o) => o.id === id)
           : kind === "guard"
             ? get().project?.world.guards.find((o) => o.id === id)
-            : get().project?.world.facilities.find((o) => o.id === id);
+            : kind === "building"
+              ? get().project?.world.buildings.find((o) => o.id === id)
+              : get().project?.world.facilities.find((o) => o.id === id);
     const origin = sel ? { x: (sel as { x: number; z: number }).x, z: (sel as { x: number; z: number }).z } : { x: 0, z: 0 };
     liveMove.id = null;
     set({ dragState: { kind, id, offsetX, offsetZ, moved: false, origin } });
@@ -400,7 +410,11 @@ export const useEditor = create<EditorState>((set, get) => ({
     const draft = deepClone(project);
     fn(draft);
     draft.modifiedAt = new Date().toISOString();
-    if (!opts?.silent) {
+    // a slider drag (same control, quick succession) is ONE undo step, not one per tick
+    const now = Date.now();
+    const merged = !!opts?.coalesce && lastCoalesce?.key === opts.coalesce && now - lastCoalesce.at < 900;
+    lastCoalesce = opts?.coalesce ? { key: opts.coalesce, at: now } : null;
+    if (!opts?.silent && !merged) {
       set((s) => ({
         project: draft,
         dirty: true,
@@ -721,6 +735,54 @@ export const useEditor = create<EditorState>((set, get) => ({
         }
       }
     });
+  },
+
+  duplicateSelected: () => {
+    const sel = get().selection;
+    if (!sel || isLocked(get()) || sel.kind === "guard" || sel.kind === "road") return;
+    const listKey = ({ streetlight: "streetlights", camera: "cameras", building: "buildings", facility: "facilities" } as const)[sel.kind];
+    const src = (get().project?.world[listKey] as { id: string; x: number; z: number }[] | undefined)?.find((o) => o.id === sel.id);
+    if (!src) return;
+    // offset by the object's own size so the copy lands beside it, not on top
+    const b = src as unknown as { width?: number; depth?: number };
+    const off = sel.kind === "building" ? Math.max(b.width ?? 10, b.depth ?? 10) + 4 : 6;
+    const id = makeId(({ streetlight: "sl", camera: "cam", building: "bd", facility: "fc" } as const)[sel.kind]);
+    get().mutateWorld((d) => {
+      const copy = { ...deepClone(src), id, x: src.x + off, z: src.z } as never;
+      const c = copy as unknown as { entrance?: { x: number; z: number }; inferred?: boolean };
+      if (c.entrance) c.entrance = { x: c.entrance.x + off, z: c.entrance.z };
+      c.inferred = false;
+      (d.world[listKey] as unknown[]).push(copy);
+    });
+    set({ selection: { kind: sel.kind, id } as Selection });
+  },
+
+  nudgeSelected: (dx, dz) => {
+    const s = get();
+    const sel = s.selection;
+    if (!sel || isLocked(s) || sel.kind === "guard" || sel.kind === "road" || !s.project) return;
+    const listKey = ({ streetlight: "streetlights", camera: "cameras", building: "buildings", facility: "facilities" } as const)[sel.kind];
+    const o = (s.project.world[listKey] as { id: string; x: number; z: number }[]).find((x) => x.id === sel.id);
+    if (o) s.moveObject(sel, o.x + dx, o.z + dz);
+  },
+
+  rotateSelected: (deg) => {
+    const s = get();
+    const sel = s.selection;
+    if (!sel || isLocked(s)) return;
+    s.mutateWorld(
+      (d) => {
+        if (sel.kind === "building") {
+          const o = d.world.buildings.find((x) => x.id === sel.id);
+          // map degrees are clockwise; three.js Y rotation is counter-clockwise from above
+          if (o) o.rotation = o.rotation - (deg * Math.PI) / 180;
+        } else if (sel.kind === "camera") {
+          const o = d.world.cameras.find((x) => x.id === sel.id);
+          if (o) o.orientationDeg = ((((o.orientationDeg + deg + 180) % 360) + 360) % 360) - 180;
+        }
+      },
+      { coalesce: `${sel.id}:rotate-key` }
+    );
   },
 
   deleteSelected: () => {

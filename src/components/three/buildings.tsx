@@ -12,7 +12,9 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
-import { useEditor } from "@/lib/store/editor";
+import { useFrame } from "@react-three/fiber";
+import { useEditor, liveMove } from "@/lib/store/editor";
+import { armPendingDrag } from "./layers";
 import type { Building, Facility } from "@/lib/world/types";
 
 type Theme = "night" | "sunset" | "daylight";
@@ -1065,6 +1067,42 @@ function placeAt(x: number, z: number) {
 
 const EMPTY_FACILITIES: Facility[] = [];
 
+/**
+ * Selection outline. While the building is being dragged it follows the pointer
+ * (liveMove, no re-render) with a translucent body, so the move is visible before
+ * the merged city mesh is rebuilt on drop.
+ */
+function SelectedBuilding({ b, edges }: { b: Building; edges: THREE.BufferGeometry }) {
+  const ref = useRef<THREE.Group>(null);
+  const dragging = useEditor((s) => s.dragState?.id === b.id && s.dragState.moved);
+  useFrame(() => {
+    const g = ref.current;
+    if (!g) return;
+    if (liveMove.id === b.id) g.position.set(liveMove.x, 0, liveMove.z);
+    else g.position.set(b.x, 0, b.z);
+  });
+  return (
+    <group ref={ref} position={[b.x, 0, b.z]} rotation={[0, b.rotation, 0]}>
+      <lineSegments position={[0, b.height / 2, 0]} geometry={edges} raycast={() => null}>
+        <lineBasicMaterial color="#38bdf8" />
+      </lineSegments>
+      {dragging && (
+        <>
+          <mesh position={[0, b.height / 2, 0]} raycast={() => null}>
+            <boxGeometry args={[b.width, b.height, b.depth]} />
+            <meshBasicMaterial color="#38bdf8" transparent opacity={0.28} depthWrite={false} />
+          </mesh>
+          {/* footprint on the ground so the drop spot is obvious */}
+          <mesh position={[0, 0.15, 0]} rotation={[-Math.PI / 2, 0, 0]} raycast={() => null}>
+            <planeGeometry args={[b.width, b.depth]} />
+            <meshBasicMaterial color="#38bdf8" transparent opacity={0.35} depthWrite={false} />
+          </mesh>
+        </>
+      )}
+    </group>
+  );
+}
+
 export function BuildingsLayer({
   buildings,
   selectedId,
@@ -1134,6 +1172,16 @@ export function BuildingsLayer({
         ref={pickRef}
         args={[undefined, undefined, Math.max(count, 1)]}
         frustumCulled={false}
+        onPointerDown={(e) => {
+          // edit mode + select tool: press-and-drag moves the building (same gesture as lights/cameras)
+          const s = useEditor.getState();
+          if (e.nativeEvent.button !== 0 || s.tool !== "select" || s.mode !== "edit" || s.activeRun !== null) return;
+          const b = e.instanceId !== undefined ? buildings[e.instanceId] : undefined;
+          if (!b) return;
+          e.stopPropagation();
+          select({ kind: "building", id: b.id });
+          armPendingDrag(e, "building", b.id, b.x - e.point.x, b.z - e.point.z);
+        }}
         onClick={(e) => {
           const s = useEditor.getState();
           if (s.tool === "road") return; // let the ground take it
@@ -1151,13 +1199,7 @@ export function BuildingsLayer({
         <meshBasicMaterial colorWrite={false} depthWrite={false} />
       </instancedMesh>
 
-      {selected && selEdges && (
-        <group position={[selected.x, 0, selected.z]} rotation={[0, selected.rotation, 0]}>
-          <lineSegments position={[0, selected.height / 2, 0]} geometry={selEdges}>
-            <lineBasicMaterial color="#38bdf8" />
-          </lineSegments>
-        </group>
-      )}
+      {selected && selEdges && <SelectedBuilding b={selected} edges={selEdges} />}
     </group>
   );
 }

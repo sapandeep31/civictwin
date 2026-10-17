@@ -27,6 +27,7 @@ page.on("pageerror", (e) => errs.push(`pageerror: ${String(e).slice(0, 200)}`));
 page.on("console", (m) => m.type() === "error" && !/favicon|DevTools/.test(m.text()) && errs.push(`console: ${m.text().slice(0, 200)}`));
 page.on("response", (r) => r.url().includes("/api/") && r.status() >= 400 && errs.push(`HTTP ${r.status()} ${r.url().split("/api/")[1]}`));
 let n = 0;
+let n0 = 0;
 
 Bun.serve({
   port: 3999,
@@ -45,6 +46,19 @@ Bun.serve({
         case "move":
           await page.mouse.move(c.x, c.y);
           break;
+        case "drag": {
+          // press at (x,y), move in steps to (x2,y2), optionally screenshot mid-drag, release
+          await page.mouse.move(c.x, c.y);
+          await page.mouse.down();
+          const n = c.steps ?? 12;
+          for (let i = 1; i <= n; i++) {
+            await page.mouse.move(c.x + ((c.x2 - c.x) * i) / n, c.y + ((c.y2 - c.y) * i) / n);
+            await new Promise((r) => setTimeout(r, 30));
+          }
+          if (c.midShot) await page.screenshot({ path: path.join(DIR, `${String(++n0).padStart(3, "0")}-mid.png`) });
+          await page.mouse.up();
+          break;
+        }
         case "text":
           out = await page.evaluate(
             (t: string, nth: number, scope: string) => {

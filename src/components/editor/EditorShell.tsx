@@ -65,6 +65,29 @@ export default function EditorShell() {
         s.redo();
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "d") {
+        if (s.selection) {
+          e.preventDefault(); // not the browser bookmark
+          s.duplicateSelected();
+        }
+        return;
+      }
+      // standard object transforms: [ ] rotate (Shift = 1°), arrows nudge (Shift = 5 m)
+      if (s.selection && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const rot = { "[": -15, "]": 15, "{": -1, "}": 1 }[e.key];
+        if (rot !== undefined) {
+          e.preventDefault();
+          s.rotateSelected(rot);
+          return;
+        }
+        const step = e.shiftKey ? 5 : 1;
+        const nudge = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+        if (nudge && s.selection.kind !== "guard" && s.selection.kind !== "road") {
+          e.preventDefault();
+          s.nudgeSelected(nudge[0], nudge[1]);
+          return;
+        }
+      }
       switch (e.key.toLowerCase()) {
         case "v":
           s.setTool("select");

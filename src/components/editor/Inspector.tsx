@@ -11,6 +11,8 @@ import { nearestRoutableNode, buildNavGraph } from "@/lib/world/graph";
 import { legBetween, polylineLength, routeLength } from "@/lib/world/patrol";
 import { useMemo } from "react";
 import { cn } from "@/lib/utils";
+import type { World } from "@/lib/world/types";
+import { NumberSlider, RotationControl, XZField, normDeg } from "./controls";
 function Field({
   label,
   children,
@@ -129,6 +131,43 @@ export default function Inspector() {
   };
 
   const found = findSelected();
+
+  /** Edit the selected object; `field` groups a slider drag into one undo step. */
+  const edit = <K extends "streetlights" | "cameras" | "buildings" | "facilities" | "roads">(list: K, field: string, fn: (o: World[K][number]) => void) => {
+    if (!selection) return;
+    const id = selection.id;
+    mutateWorld(
+      (d) => {
+        const o = (d.world[list] as World[K][number][]).find((x) => x.id === id);
+        if (o) fn(o);
+      },
+      { coalesce: `${id}:${field}` }
+    );
+  };
+  const radToDeg = (r: number) => normDeg((-r * 180) / Math.PI); // three.js Y rotation → clockwise map degrees
+  const degToRad = (d: number) => (-d * Math.PI) / 180;
+  /** Direction (clockwise map degrees, folded to ±90) of the nearest mapped road to a point. */
+  const nearestRoadDeg = (x: number, z: number): number | null => {
+    let best: { d: number; deg: number } | null = null;
+    for (const r of world.roads) {
+      for (let i = 1; i < r.points.length; i++) {
+        const a = r.points[i - 1];
+        const b = r.points[i];
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        const l2 = dx * dx + dz * dz;
+        if (l2 < 1) continue;
+        const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (z - a.z) * dz) / l2));
+        const d = Math.hypot(x - (a.x + t * dx), z - (a.z + t * dz)) + (r.category === "path" ? 15 : 0);
+        if (!best || d < best.d) best = { d, deg: (Math.atan2(dz, dx) * 180) / Math.PI };
+      }
+    }
+    if (!best) return null;
+    let deg = normDeg(best.deg);
+    if (deg > 90) deg -= 180;
+    if (deg <= -90) deg += 180;
+    return Math.round(deg);
+  };
   const isConnected =
     found && graphInfo && found.kind !== "road"
       ? (() => {
@@ -201,77 +240,37 @@ export default function Inspector() {
 
             {selection?.kind === "streetlight" && (
               <>
-                <Field label="Position (x, z)">
-                  <div className="flex gap-1">
-                    <input
-                      className="w-full rounded border border-[#dcd6c8] bg-white px-1.5 py-1 font-mono text-[11px]"
-                      value={num(found.obj.x)}
-                      onChange={(e) => {
-                        const v = parseFloat(e.target.value) || 0;
-                        mutateWorld((d) => {
-                          const o = d.world.streetlights.find((x) => x.id === selection.id);
-                          if (o) o.x = v;
-                        });
-                      }}
-                    />
-                    <input
-                      className="w-full rounded border border-[#dcd6c8] bg-white px-1.5 py-1 font-mono text-[11px]"
-                      value={num(found.obj.z)}
-                      onChange={(e) => {
-                        const v = parseFloat(e.target.value) || 0;
-                        mutateWorld((d) => {
-                          const o = d.world.streetlights.find((x) => x.id === selection.id);
-                          if (o) o.z = v;
-                        });
-                      }}
-                    />
-                  </div>
-                </Field>
-                <Field label={`Brightness — ${Math.round(found.obj.brightness * 100)}%`}>
-                  <input
-                    type="range"
-                    min={10}
-                    max={100}
-                    value={Math.round(found.obj.brightness * 100)}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
-                        const o = d.world.streetlights.find((x) => x.id === selection.id);
-                        if (o) o.brightness = parseInt(e.target.value, 10) / 100;
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
-                  />
-                </Field>
-                <Field label={`Illumination radius — ${found.obj.radius} m`}>
-                  <input
-                    type="range"
-                    min={6}
-                    max={40}
-                    value={found.obj.radius}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
-                        const o = d.world.streetlights.find((x) => x.id === selection.id);
-                        if (o) o.radius = parseInt(e.target.value, 10);
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
-                  />
-                </Field>
-                <Field label={`Pole height — ${found.obj.height} m`}>
-                  <input
-                    type="range"
-                    min={4}
-                    max={14}
-                    value={found.obj.height}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
-                        const o = d.world.streetlights.find((x) => x.id === selection.id);
-                        if (o) o.height = parseInt(e.target.value, 10);
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
-                  />
-                </Field>
+                <XZField x={found.obj.x} z={found.obj.z} onChange={(x, z) => useEditor.getState().moveObject({ kind: "streetlight", id: selection.id }, x, z)} />
+                <NumberSlider
+                  label="Brightness"
+                  unit="%"
+                  min={10}
+                  max={100}
+                  value={Math.round(found.obj.brightness * 100)}
+                  onChange={(v) => edit("streetlights", "brightness", (o) => void (o.brightness = v / 100))}
+                />
+                <NumberSlider
+                  label="Light radius"
+                  unit="m"
+                  min={5}
+                  max={45}
+                  value={found.obj.radius}
+                  presets={[
+                    { label: "Path 12 m", value: 12 },
+                    { label: "Street 20 m", value: 20 },
+                    { label: "Flood 32 m", value: 32 },
+                  ]}
+                  onChange={(v) => edit("streetlights", "radius", (o) => void (o.radius = Math.round(v)))}
+                />
+                <NumberSlider
+                  label="Pole height"
+                  unit="m"
+                  min={3}
+                  max={16}
+                  step={0.5}
+                  value={found.obj.height}
+                  onChange={(v) => edit("streetlights", "height", (o) => void (o.height = v))}
+                />
                 <div className="flex gap-3 py-1">
                   <label className="flex items-center gap-1.5 text-[11px]">
                     <input
@@ -307,51 +306,44 @@ export default function Inspector() {
 
             {selection?.kind === "camera" && (
               <>
-                <Field label={`Orientation — ${found.obj.orientationDeg}°`} hint="0° = east, clockwise">
-                  <input
-                    type="range"
-                    min={0}
-                    max={359}
-                    value={found.obj.orientationDeg}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
-                        const o = d.world.cameras.find((x) => x.id === selection.id);
-                        if (o) o.orientationDeg = parseInt(e.target.value, 10);
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
-                  />
-                </Field>
-                <Field label={`Field of view — ${found.obj.fovDeg}°`}>
-                  <input
-                    type="range"
-                    min={20}
-                    max={360}
-                    value={found.obj.fovDeg}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
-                        const o = d.world.cameras.find((x) => x.id === selection.id);
-                        if (o) o.fovDeg = parseInt(e.target.value, 10);
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
-                  />
-                </Field>
-                <Field label={`Effective range — ${found.obj.range} m`}>
-                  <input
-                    type="range"
-                    min={6}
-                    max={60}
-                    value={found.obj.range}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
-                        const o = d.world.cameras.find((x) => x.id === selection.id);
-                        if (o) o.range = parseInt(e.target.value, 10);
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
-                  />
-                </Field>
+                <XZField x={found.obj.x} z={found.obj.z} onChange={(x, z) => useEditor.getState().moveObject({ kind: "camera", id: selection.id }, x, z)} />
+                <RotationControl
+                  label="Facing"
+                  value={normDeg(found.obj.orientationDeg)}
+                  onChange={(deg) => edit("cameras", "facing", (o) => void (o.orientationDeg = deg))}
+                  onAlign={() => {
+                    const deg = nearestRoadDeg(found.obj.x, found.obj.z);
+                    if (deg === null) return;
+                    // look along the road, choosing the direction that points more toward the society centre
+                    const toCentre = (Math.atan2(-found.obj.z, -found.obj.x) * 180) / Math.PI;
+                    const diff = (a: number) => Math.abs(normDeg(a - toCentre));
+                    edit("cameras", "align", (o) => void (o.orientationDeg = diff(deg) <= diff(deg + 180) ? deg : normDeg(deg + 180)));
+                  }}
+                  alignLabel="Look along road"
+                  hint="Direction the camera looks, degrees clockwise from east. Keyboard: [ and ] rotate 15° (Shift = 1°)."
+                />
+                <NumberSlider
+                  label="Field of view"
+                  unit="°"
+                  min={20}
+                  max={360}
+                  value={found.obj.fovDeg}
+                  presets={[
+                    { label: "Narrow 45°", value: 45 },
+                    { label: "Standard 90°", value: 90 },
+                    { label: "Wide 120°", value: 120 },
+                    { label: "Dome 360°", value: 360 },
+                  ]}
+                  onChange={(v) => edit("cameras", "fov", (o) => void (o.fovDeg = Math.round(v)))}
+                />
+                <NumberSlider
+                  label="Effective range"
+                  unit="m"
+                  min={5}
+                  max={60}
+                  value={found.obj.range}
+                  onChange={(v) => edit("cameras", "range", (o) => void (o.range = Math.round(v)))}
+                />
                 <label className="flex items-center gap-1.5 py-1 text-[11px]">
                   <input
                     type="checkbox"
@@ -379,25 +371,32 @@ export default function Inspector() {
                       mutateWorld((d) => {
                         const o = d.world.guards.find((x) => x.id === selection.id);
                         if (o) o.name = e.target.value.slice(0, 40);
-                      })
+                      }, { coalesce: `${selection.id}:name` })
                     }
                   />
                 </Field>
-                <Field label={`Speed — ${found.obj.speed} m/s`}>
-                  <input
-                    type="range"
-                    min={40}
-                    max={250}
-                    value={Math.round(found.obj.speed * 100)}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
+                <NumberSlider
+                  label="Walking speed"
+                  unit="m/s"
+                  min={0.4}
+                  max={2.5}
+                  step={0.05}
+                  value={found.obj.speed}
+                  presets={[
+                    { label: "Slow 0.9", value: 0.9 },
+                    { label: "Patrol 1.15", value: 1.15 },
+                    { label: "Brisk 1.5", value: 1.5 },
+                  ]}
+                  onChange={(v) =>
+                    mutateWorld(
+                      (d) => {
                         const o = d.world.guards.find((x) => x.id === selection.id);
-                        if (o) o.speed = parseInt(e.target.value, 10) / 100;
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
-                  />
-                </Field>
+                        if (o) o.speed = v;
+                      },
+                      { coalesce: `${selection.id}:speed` }
+                    )
+                  }
+                />
                 <label className="flex items-center gap-1.5 py-1 text-[11px]">
                   <input
                     type="checkbox"
@@ -505,7 +504,7 @@ export default function Inspector() {
                       mutateWorld((d) => {
                         const o = d.world.buildings.find((x) => x.id === selection.id);
                         if (o) o.name = e.target.value.slice(0, 60);
-                      })
+                      }, { coalesce: `${selection.id}:name` })
                     }
                   />
                 </Field>
@@ -527,44 +526,95 @@ export default function Inspector() {
                     ))}
                   </select>
                 </Field>
-                <Field label={`Floors — ${found.obj.floors} (${found.obj.height} m)`}>
-                  <input
-                    type="range"
-                    min={1}
-                    max={12}
-                    value={found.obj.floors}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
-                        const o = d.world.buildings.find((x) => x.id === selection.id);
-                        if (o) {
-                          o.floors = parseInt(e.target.value, 10);
-                          o.height = o.floors * 3;
-                        }
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
+                <div className="my-1 rounded-md border border-[#e3ded4] bg-white px-2 py-1">
+                  <div className="pt-1 text-[10px] font-semibold uppercase tracking-wider text-[#1d2430]">Shape &amp; placement</div>
+                  <XZField
+                    x={found.obj.x}
+                    z={found.obj.z}
+                    onChange={(x, z) => useEditor.getState().moveObject({ kind: "building", id: selection.id }, x, z)}
                   />
-                </Field>
-                <Field label={`Overnight occupancy — ${found.obj.occupancy}`} hint="Synthetic estimate used to seed simulated residents">
-                  <input
-                    type="range"
-                    min={0}
-                    max={80}
-                    value={found.obj.occupancy}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
-                        const o = d.world.buildings.find((x) => x.id === selection.id);
-                        if (o) o.occupancy = parseInt(e.target.value, 10);
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
+                  <NumberSlider
+                    label="Width"
+                    unit="m"
+                    min={2}
+                    max={200}
+                    sliderMax={120}
+                    step={0.5}
+                    value={found.obj.width}
+                    onChange={(v) => edit("buildings", "width", (o) => void (o.width = v))}
                   />
-                </Field>
+                  <NumberSlider
+                    label="Depth"
+                    unit="m"
+                    min={2}
+                    max={200}
+                    sliderMax={120}
+                    step={0.5}
+                    value={found.obj.depth}
+                    onChange={(v) => edit("buildings", "depth", (o) => void (o.depth = v))}
+                  />
+                  <div className="-mt-0.5 flex justify-end">
+                    <button
+                      type="button"
+                      className="rounded px-1.5 py-0.5 text-[10px] text-[#5c6470] hover:bg-[#f4f2ec]"
+                      onClick={() =>
+                        edit("buildings", "swap", (o) => {
+                          [o.width, o.depth] = [o.depth, o.width];
+                        })
+                      }
+                      title="Swap width and depth (same as turning the footprint 90°)"
+                    >
+                      ⇄ Swap width / depth
+                    </button>
+                  </div>
+                  <RotationControl
+                    value={radToDeg(found.obj.rotation)}
+                    onChange={(deg) => edit("buildings", "rotation", (o) => void (o.rotation = degToRad(deg)))}
+                    onAlign={() => {
+                      const deg = nearestRoadDeg(found.obj.x, found.obj.z);
+                      if (deg !== null) edit("buildings", "align", (o) => void (o.rotation = degToRad(deg)));
+                    }}
+                  />
+                </div>
+                <NumberSlider
+                  label="Floors"
+                  unit={`fl · ${found.obj.height} m`}
+                  min={1}
+                  max={45}
+                  sliderMax={40}
+                  value={found.obj.floors}
+                  presets={[
+                    { label: "House 2", value: 2 },
+                    { label: "Apts 5", value: 5 },
+                    { label: "Tower 14", value: 14 },
+                    { label: "High-rise 24", value: 24 },
+                  ]}
+                  onChange={(v) =>
+                    edit("buildings", "floors", (o) => {
+                      o.floors = Math.round(v);
+                      o.height = o.floors * 3;
+                    })
+                  }
+                />
+                <NumberSlider
+                  label="Overnight occupancy"
+                  unit="people"
+                  min={0}
+                  max={3000}
+                  sliderMax={600}
+                  hint="Synthetic estimate used to seed simulated residents"
+                  value={found.obj.occupancy}
+                  onChange={(v) => edit("buildings", "occupancy", (o) => void (o.occupancy = Math.round(v)))}
+                />
                 {found.obj.inferred && (
                   <p className="py-1 text-[10px] text-[#b98a2f]">
-                    Height was inferred during import (no mapped data) and is not an authoritative fact.
+                    Shape or height was estimated during import — correct it here if you know the real building.
                   </p>
                 )}
+                <p className="pt-1 text-[10px] leading-snug text-[#8a8272]">
+                  Drag the building in the 3D view to move it (Edit mode) · <kbd className="rounded bg-[#f1ede4] px-1">[</kbd>{" "}
+                  <kbd className="rounded bg-[#f1ede4] px-1">]</kbd> rotate · arrow keys nudge
+                </p>
               </>
             )}
 
@@ -578,7 +628,7 @@ export default function Inspector() {
                       mutateWorld((d) => {
                         const o = d.world.facilities.find((x) => x.id === selection.id);
                         if (o) o.name = e.target.value.slice(0, 60);
-                      })
+                      }, { coalesce: `${selection.id}:name` })
                     }
                   />
                 </Field>
@@ -600,22 +650,16 @@ export default function Inspector() {
                     ))}
                   </select>
                 </Field>
+                <XZField x={found.obj.x} z={found.obj.z} onChange={(x, z) => useEditor.getState().moveObject({ kind: "facility", id: selection.id }, x, z)} />
                 {found.obj.type === "park" && (
-                  <Field label={`Radius — ${found.obj.radius ?? 20} m`}>
-                    <input
-                      type="range"
-                      min={8}
-                      max={80}
-                      value={found.obj.radius ?? 20}
-                      onChange={(e) =>
-                        mutateWorld((d) => {
-                          const o = d.world.facilities.find((x) => x.id === selection.id);
-                          if (o) o.radius = parseInt(e.target.value, 10);
-                        })
-                      }
-                      className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
-                    />
-                  </Field>
+                  <NumberSlider
+                    label="Park radius"
+                    unit="m"
+                    min={5}
+                    max={90}
+                    value={found.obj.radius ?? 20}
+                    onChange={(v) => edit("facilities", "radius", (o) => void (o.radius = Math.round(v)))}
+                  />
                 )}
               </>
             )}
@@ -630,7 +674,7 @@ export default function Inspector() {
                       mutateWorld((d) => {
                         const o = d.world.roads.find((x) => x.id === selection.id);
                         if (o) o.name = e.target.value.slice(0, 60);
-                      })
+                      }, { coalesce: `${selection.id}:name` })
                     }
                   />
                 </Field>
@@ -649,22 +693,21 @@ export default function Inspector() {
                     <option value="path">pedestrian path</option>
                   </select>
                 </Field>
-                <Field label={`Width — ${found.obj.width} m`}>
-                  <input
-                    type="range"
-                    min={1.5}
-                    max={14}
-                    step={0.5}
-                    value={found.obj.width}
-                    onChange={(e) =>
-                      mutateWorld((d) => {
-                        const o = d.world.roads.find((x) => x.id === selection.id);
-                        if (o) o.width = parseFloat(e.target.value);
-                      })
-                    }
-                    className="h-1 w-full cursor-pointer appearance-none rounded bg-[#ddd6c8] accent-[#2e7d5b]"
-                  />
-                </Field>
+                <NumberSlider
+                  label="Width"
+                  unit="m"
+                  min={1.5}
+                  max={16}
+                  step={0.5}
+                  value={found.obj.width}
+                  presets={[
+                    { label: "Footpath 2", value: 2 },
+                    { label: "Lane 4.5", value: 4.5 },
+                    { label: "Road 6.5", value: 6.5 },
+                    { label: "Main 10", value: 10 },
+                  ]}
+                  onChange={(v) => edit("roads", "width", (o) => void (o.width = v))}
+                />
                 <label className="flex items-center gap-1.5 py-1 text-[11px]">
                   <input
                     type="checkbox"
@@ -711,24 +754,8 @@ export default function Inspector() {
               >
                 {moveMode ? "Click the map…" : "Move"}
               </Button>
-              {selection?.kind === "streetlight" && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 text-[11px]"
-                  onClick={() => {
-                    mutateWorld((d) => {
-                      const o = d.world.streetlights.find((x) => x.id === selection!.id);
-                      if (o)
-                        d.world.streetlights.push({
-                          ...o,
-                          id: `sl_${Math.random().toString(36).slice(2, 9)}`,
-                          x: o.x + 6,
-                          z: o.z + 6,
-                        });
-                    });
-                  }}
-                >
+              {selection && selection.kind !== "guard" && selection.kind !== "road" && (
+                <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => useEditor.getState().duplicateSelected()} title="Duplicate (Ctrl+D)">
                   Duplicate
                 </Button>
               )}
@@ -744,7 +771,10 @@ export default function Inspector() {
                 Delete
               </Button>
             </div>
-            <p className="mt-2 text-[10px] text-[#8a8272]">Delete can be undone with Ctrl+Z.</p>
+            <p className="mt-2 text-[10px] leading-snug text-[#8a8272]">
+              Ctrl+Z undoes any change · Ctrl+D duplicates · arrows nudge 1 m (Shift 5 m)
+              {(selection?.kind === "building" || selection?.kind === "camera") && " · [ ] rotate 15° (Shift 1°)"}
+            </p>
           </div>
         )}
       </fieldset>
